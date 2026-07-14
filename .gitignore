@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+*.egg
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database (production SQLite)
+*.db
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Backup directories
+.archive_bak/
+.backup_*/
+.brain_upgrade_bak_*/
+.security_fix_bak_*/
+
+# Backup files
+*.bak
+*.bak_*
+*.bak.*
+
+# Logs
+*.log
+logs/
+
+# Secrets - do not commit
+config/api_keys.json
+data/
+*.broken
+services/ai_providers.py.broken
+
+# Pipeline cache
+data/pipeline_cache/
+cache/
+*.json

@@ -1,0 +1,75 @@
+"""会员 API Key 管理路由"""
+import json
+import logging
+from fastapi import APIRouter, Request, HTTPException
+from pydantic import BaseModel
+from typing import Optional
+from services.user_key_manager import (
+    get_user_keys, save_user_key, delete_user_key,
+    SUPPORTED_PROVIDERS, init_tables
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v1/user-keys", tags=["user-keys"])
+
+def get_user_id(request: Request) -> int:
+    """从 request 提取 user_id"""
+    # 优先从 Authorization header 拿
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:]
+        # 简单 decode：实际应走 auth 中间件
+        import sqlite3, os
+        db = sqlite3.connect(os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db"))
+        row = db.execute("SELECT id FROM users WHERE token=?", (token,)).fetchone()
+        db.close()
+        if row:
+            return row[0]
+    return 0
+
+class KeySaveRequest(BaseModel):
+    provider: str
+    api_key: str
+    api_secret: str = ""
+    description: str = ""
+
+@router.get("/providers")
+async def list_providers():
+    """返回支持的 Provider 列表及费率"""
+    return {"success": True, "data": {
+        "providers": SUPPORTED_PROVIDERS,
+        "platform_fee_per_second": 0.06,
+        "platform_fee_label": "0.06元/秒",
+    }}
+
+@router.get("/")
+async def get_my_keys(request: Request):
+    """获取当前会员的所有 Key"""
+    uid = get_user_id(request)
+    if uid <= 0:
+        return {"success": False, "error": "未登录"}
+    keys = get_user_keys(uid)
+    return {"success": True, "data": keys}
+
+@router.post("/")
+async def save_key(body: KeySaveRequest, request: Request):
+    """保存会员的 Key"""
+    uid = get_user_id(request)
+    if uid <= 0:
+        return {"success": False, "error": "未登录"}
+    if body.provider not in SUPPORTED_PROVIDERS:
+        return {"success": False, "error": f"不支持的 Provider: {body.provider}"}
+    save_user_key(uid, body.provider, body.api_key, body.api_secret, body.description)
+    return {"success": True, "message": f"{SUPPORTED_PROVIDERS[body.provider]} Key 已保存"}
+
+@router.delete("/{provider}")
+async def delete_key(provider: str, request: Request):
+    """删除会员的 Key"""
+    uid = get_user_id(request)
+    if uid <= 0:
+        return {"success": False, "error": "未登录"}
+    delete_user_key(uid, provider)
+    return {"success": True, "message": f"{provider} Key 已删除"}
+
+# 启动时初始化表
+init_tables()

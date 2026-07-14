@@ -1,0 +1,12 @@
+导演分析: success=True  error=
+剧本创作: success=True  error=
+角色设计: success=True  error=
+分镜生成: success=True  error=
+场景生成: success=True  error=
+配音合成: success=True  error=
+字幕生成: success=True  error=
+BGM配乐: success=True  error=
+视频生成: success=False  error=Expecting value: line 1 column 1 (char 0)
+视频合成: success=False  error=无分镜素材
+
+progress=100% status=completed
