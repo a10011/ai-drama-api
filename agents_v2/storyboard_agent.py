@@ -112,15 +112,31 @@ class StoryboardAgent(AgentV3):
         if m:
             try: return json.loads(m.group(1).strip())
             except: pass
-        # 3. 提取最外层 [] （容忍截断）
+        # 3. 提取 [] 并强制补全
         m = re.search(r'\[[\s\S]*', text)
         if m:
             raw = m.group(0)
-            for attempt in [raw, raw + ']', raw.rstrip(',') + ']']:
-                try: return json.loads(attempt)
-                except: pass
-            last_bracket = raw.rfind(']')
-            if last_bracket > 0:
-                try: return json.loads(raw[:last_bracket+1])
-                except: pass
+            # 去掉末尾逗号
+            raw = raw.rstrip()
+            if raw.endswith(','):
+                raw = raw[:-1]
+            # 补全括号
+            open_brackets = raw.count('[')
+            close_brackets = raw.count(']')
+            if open_brackets > close_brackets:
+                raw += ']' * (open_brackets - close_brackets)
+            # 尝试解析
+            try: return json.loads(raw)
+            except: pass
+            # 更激进：逐层剥离到最后有效的JSON
+            for i in range(len(raw), 0, -10):
+                try:
+                    candidate = raw[:i].rstrip().rstrip(',')
+                    if open_brackets > close_brackets:
+                        candidate += ']' * (raw[:i].count('[') - raw[:i].count(']'))
+                    result = json.loads(candidate)
+                    if isinstance(result, list):
+                        return result
+                except:
+                    continue
         return []

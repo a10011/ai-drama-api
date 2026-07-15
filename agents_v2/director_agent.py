@@ -248,19 +248,46 @@ class DirectorAgent(AgentV3):
         if m:
             try: return json.loads(m.group(1).strip())
             except: pass
-        # 3. 提取最外层 {} （容忍截断）
+        # 3. 提取 {} 并强制补全
         m = re.search(r'\{[\s\S]*', text)
         if m:
             raw = m.group(0)
-            # 补全可能的截断：在最后加 }
-            for attempt in [raw, raw + '}', raw.rstrip(',') + '}']:
-                try: return json.loads(attempt)
-                except: pass
-            # 更激进：从后往前找最后一个闭合的 }
-            last_brace = raw.rfind('}')
-            if last_brace > 0:
-                try: return json.loads(raw[:last_brace+1])
-                except: pass
+            # 去掉末尾逗号
+            raw = raw.rstrip()
+            if raw.endswith(','):
+                raw = raw[:-1]
+            # 补全括号
+            open_braces = raw.count('{')
+            close_braces = raw.count('}')
+            if open_braces > close_braces:
+                raw += '}' * (open_braces - close_braces)
+            # 补全字符串引号
+            in_string = False
+            escaped = False
+            for i, ch in enumerate(raw):
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == '\\':
+                    escaped = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                elif ch == ':' and in_string:
+                    # 字符串内的冒号，跳过
+                    pass
+            # 尝试解析
+            try: return json.loads(raw)
+            except: pass
+            # 更激进：逐层剥离到最后有效的JSON
+            for i in range(len(raw), 0, -10):
+                try:
+                    candidate = raw[:i].rstrip().rstrip(',')
+                    if open_braces > close_braces:
+                        candidate += '}' * (raw[:i].count('{') - raw[:i].count('}'))
+                    return json.loads(candidate)
+                except:
+                    continue
         return {}
 
     def _evolution_check(self, task: dict) -> list:
