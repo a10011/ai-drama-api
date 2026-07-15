@@ -239,16 +239,28 @@ class DirectorAgent(AgentV3):
 
     def _parse_json(self, text: str) -> dict:
         if not text: return {}
+        text = text.strip()
+        # 1. 直接解析
         try: return json.loads(text)
         except: pass
+        # 2. 提取 ```json ... ``` 块
         m = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
         if m:
-            try: return json.loads(m.group(1))
+            try: return json.loads(m.group(1).strip())
             except: pass
-        m = re.search(r'\{[\s\S]*\}', text)
+        # 3. 提取最外层 {} （容忍截断）
+        m = re.search(r'\{[\s\S]*', text)
         if m:
-            try: return json.loads(m.group(0))
-            except: pass
+            raw = m.group(0)
+            # 补全可能的截断：在最后加 }
+            for attempt in [raw, raw + '}', raw.rstrip(',') + '}']:
+                try: return json.loads(attempt)
+                except: pass
+            # 更激进：从后往前找最后一个闭合的 }
+            last_brace = raw.rfind('}')
+            if last_brace > 0:
+                try: return json.loads(raw[:last_brace+1])
+                except: pass
         return {}
 
     def _evolution_check(self, task: dict) -> list:
