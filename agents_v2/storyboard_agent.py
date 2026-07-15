@@ -48,7 +48,7 @@ class StoryboardAgent(AgentV3):
         char_info = ""
         if chars:
             char_info = "角色:\n" + "\n".join([
-                f"{c.get('name','?')}: {c.get('appearance','')[:60]}" 
+                f"{c.get('name','?')}: {c.get('appearance', c.get('features',''))[:60]}" 
                 for c in chars[:10] if c.get("name")
             ])
 

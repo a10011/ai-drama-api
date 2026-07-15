@@ -198,10 +198,11 @@ class DirectorAgent(AgentV3):
                 "scenes": scenes,
             }
 
+            # 字段名映射：prompt输出的中文key → tasks的英文key
             analysis["tasks"] = {
                 "storyboard": analysis.pop("给分镜师", "") or "根据剧本设计分镜",
                 "character": analysis.pop("给角色设计师", "") or "根据角色信息设计造型",
-                "cinematographer": analysis.pop("给摄影师", "") or "根据场景设计摄影方案",
+                "cinematographer": analysis.pop("给摄影师", "") or analysis.pop("给场景设计师", "") or "根据场景设计摄影方案",
                 "scene": analysis.pop("给场景设计师", "") or "根据剧本设计场景",
                 "audio": analysis.pop("给配音师", "") or "根据角色性格设计配音",
                 "video": analysis.pop("给剪辑师", "") or "根据节奏设计剪辑方案",

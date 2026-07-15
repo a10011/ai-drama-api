@@ -245,6 +245,8 @@ AGENT_SPECS: Dict[Stage, AgentParamSpec] = {
             "script_text":    "script_text",
             "director_task":  "director_task",
             "genre":          "genre",
+            "wardrobe_plan":  "wardrobe_hint",
+            "visual_style":   "visual_style",
         },
         pre_hook="extract_director_tasks",
         post_process="gen_portraits",
@@ -568,6 +570,17 @@ class PipelineOrchestrator:
 
         for ctx_path, agent_key in spec.param_map.items():
             val = self.ctx.get(ctx_path)
+            # 特殊处理：director_analysis 不在 ctx 字段里，需要从 results 取
+            if ctx_path == "director_analysis":
+                val = self.ctx.results.get("director", {}).get("director_analysis", "")
+                if not val:
+                    val = self.ctx.results.get("director", {})
+            # 特殊处理：director_beats 在 _computed 里
+            if ctx_path == "director_beats":
+                val = self.ctx._computed.get("director_beats", "")
+            # 特殊处理：scenes 在 _computed 里
+            if ctx_path == "scenes" and not val:
+                val = self.ctx._computed.get("scenes", [])
             # Always pass the param, even if empty — agents handle empty inputs
             params[agent_key] = val if val is not None else None
 
@@ -590,7 +603,10 @@ class PipelineOrchestrator:
     async def _do_call_agent_with_retry(self, stage: Stage, spec, attempt: int = 0) -> Tuple[bool, Dict[str, Any], str]:
         """智能重试：先诊断、再决定→可修自修/该停就停/该等信息上报
     确定性链路：按阶段合理重试（RETRY_CONFIG），不假成功、不偷偷降级换模型。
-    重试到真没救才标 failed，保留诊断供后端排查。会员侧只感知最终成功。"""
+    重试到真没救才标 failed，保留诊断供后端排查。会员侧只感知最终成功。
+    
+    特殊逻辑：如果下游Agent因为没拿到导演数据而失败，主动请求导演补充，
+    最多请求3次，导演不回复就暂停等恢复。"""
         # 按阶段读重试配置（scene 3次、video 6次、tts/bgm 2次、LLM类 1次）
         _rc = RETRY_CONFIG.get(stage, {"max_retries": DEFAULT_RETRIES, "backoff_s": DEFAULT_BACKOFF})
         MAX_RETRIES = _rc.get("max_retries", DEFAULT_RETRIES)
@@ -670,21 +686,20 @@ class PipelineOrchestrator:
 
         elapsed = int((time.time() - start) * 1000)
         success = resp.get("success", False)
-        data = resp.get("data", {})
         error_msg = resp.get("error", "")
         
         if success:
             self._retry_history.pop(stage_key, None)  # 成功后清除错误历史
             logger.info(f"[管家] ← {label} 完成 ({elapsed}ms)")
-            self.ctx.set_result(stage, data)
-            self._notify(stage, "completed", data)
-            self._sync_top_level(stage, data)
+            self.ctx.set_result(stage, resp)
+            self._notify(stage, "completed", resp)
+            self._sync_top_level(stage, resp)
             if spec.post_process:
                 pp_fn = self._post_processes.get(spec.post_process)
                 if pp_fn:
-                    try: await pp_fn(data)
+                    try: await pp_fn(resp)
                     except Exception as e: logger.warning(f"[管家] post_process {spec.post_process} 失败: {e}")
-            return True, data, ""
+            return True, resp, ""
         
         # ── 失败：先诊断，再决定 ──
         diag = diagnose_error(error_msg)
@@ -700,6 +715,21 @@ class PipelineOrchestrator:
         
         # ── 致命错误：立即停 ──
         if reason in FailureReason.FATAL:
+            # 特殊处理：如果是因为没拿到导演数据，主动请求导演补充
+            if "导演" in error_msg or "未提供" in error_msg or "未拿到" in error_msg:
+                logger.warning(f"[管家] {label} 因缺少导演数据失败，尝试请求导演补充...")
+                director_resp = await self._request_director_update()
+                if director_resp:
+                    logger.info(f"[管家] 导演已补充数据，重试 {label}")
+                    self._notify(stage, "retrying", {"error": user_msg, "attempt": attempt+1, "max": MAX_RETRIES, "fix": "director_updated"})
+                    await asyncio.sleep(BASE_WAIT)
+                    return await self._do_call_agent_with_retry(stage, spec, attempt + 1)
+                else:
+                    logger.error(f"[管家] 导演未回复，暂停 {label}")
+                    self._persist_stage(stage, "paused", {}, f"导演未回复，等待恢复")
+                    self._notify(stage, "paused", {"error": "导演未回复，已暂停等待恢复"})
+                    return False, {"_diagnosis": {"reason": "director_unresponsive", "detail": "导演未回复，已暂停"}}, "director_unresponsive"
+            
             logger.error(f"[管家] {label} 💀 致命错误 [{reason}]: {diag['detail']}")
             self._notify(stage, "fatal", {"error": diag["detail"], "user_msg": user_msg})
             return False, {"_diagnosis": diag, "_fatal": True}, error_msg
@@ -758,6 +788,139 @@ class PipelineOrchestrator:
         logger.error(f"[运维] {label} 无法自动恢复 [{reason}]: {diag['detail']}")
         self._notify(stage, "failed", {"error": user_msg, "diagnosis": diag})
         return False, {"_diagnosis": diag, "_fatal": False}, error_msg
+    
+    async def _request_director_update(self) -> Optional[Dict]:
+        """主动请求导演补充缺失数据。最多请求3次，每次间隔10秒。
+        返回补充后的数据，如果导演不回复则返回None。"""
+        max_attempts = 3
+        for i in range(max_attempts):
+            logger.info(f"[管家] 请求导演补充数据 (尝试 {i+1}/{max_attempts})")
+            
+            # 调用 DirectorAgent
+            try:
+                spec = AGENT_SPECS.get(Stage.DIRECTOR)
+                if not spec:
+                    logger.error("[管家] 未找到导演阶段配置")
+                    return None
+                
+                # 构建请求参数
+                payload = {
+                    "agent_id": spec.agent_id,
+                    "action": spec.action,
+                    "params": {
+                        "script_text": self.ctx.script_text or self.ctx.synopsis,
+                        "genre": self.ctx.genre,
+                        "title": self.ctx.title,
+                        "characters": self.ctx.characters,
+                        "pipeline_id": self.pipeline_id,
+                    },
+                }
+                
+                timeout = spec.timeout or self.http_timeout
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    r = await client.post(AGENT_BASE_URL, json=payload)
+                    r.raise_for_status()
+                    resp = r.json()
+                
+                if resp.get("success"):
+                    director_data = resp.get("data", resp)
+                    # 存入 results
+                    self.ctx.set_result(Stage.DIRECTOR, director_data)
+                    self._sync_top_level(Stage.DIRECTOR, director_data)
+                    
+                    # 重新执行 pre_hook 填充 _computed
+                    if spec.pre_hook:
+                        hook_fn = self._pre_hooks.get(spec.pre_hook)
+                        if hook_fn:
+                            try:
+                                await hook_fn()
+                            except Exception as e:
+                                logger.warning(f"[管家] pre_hook '{spec.pre_hook}' 失败: {e}")
+                    
+                    logger.info(f"[管家] 导演已补充数据，包含 {len(director_data.get('characters', []))} 个角色")
+                    return director_data
+                else:
+                    logger.warning(f"[管家] 导演回复失败: {resp.get('error', 'unknown')}")
+                    if i < max_attempts - 1:
+                        await asyncio.sleep(10)
+                        
+            except Exception as e:
+                logger.error(f"[管家] 请求导演失败: {e}")
+                if i < max_attempts - 1:
+                    await asyncio.sleep(10)
+        
+        logger.error(f"[管家] 导演 {max_attempts} 次未回复，暂停管线")
+        return None
+
+    def is_paused(self) -> bool:
+        """检查管线是否处于暂停状态（等待导演恢复）"""
+        return getattr(self, '_paused', False)
+    
+    def resume(self):
+        """恢复暂停的管线"""
+        self._paused = False
+        logger.info(f"[管家] 管线已恢复 (pipeline_id={self.pipeline_id})")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 后台重试 worker：定期检查暂停的管线，尝试恢复
+# ═══════════════════════════════════════════════════════════════════════════
+_paused_pipelines: Dict[str, Dict] = {}  # pipeline_id -> {ctx, last_failed_stage, paused_at}
+
+def register_paused_pipeline(pipeline_id: str, ctx: PipelineContext, failed_stage: str):
+    """注册暂停的管线"""
+    _paused_pipelines[pipeline_id] = {
+        "ctx": ctx,
+        "last_failed_stage": failed_stage,
+        "paused_at": time.time(),
+    }
+    logger.info(f"[管家] 管线暂停: {pipeline_id} (失败阶段: {failed_stage})")
+
+
+def retry_paused_pipelines():
+    """定期重试暂停的管线"""
+    now = time.time()
+    to_remove = []
+    
+    for pid, info in _paused_pipelines.items():
+        # 暂停超过60秒才重试
+        if now - info["paused_at"] < 60:
+            continue
+        
+        logger.info(f"[管家] 重试暂停管线: {pid}")
+        ctx = info["ctx"]
+        ctx._paused = False
+        
+        # 重新执行失败的阶段
+        try:
+            orch = PipelineOrchestrator(ctx, pipeline_id=pid)
+            # 从失败阶段重新开始
+            result = orch.run_sync(start_from=None, use_dag=False)
+            if result.get("success"):
+                to_remove.append(pid)
+                logger.info(f"[管家] 管线恢复成功: {pid}")
+            else:
+                info["paused_at"] = now  # 重置计时
+        except Exception as e:
+            logger.error(f"[管家] 管线恢复失败: {pid} - {e}")
+            info["paused_at"] = now  # 重置计时
+    
+    for pid in to_remove:
+        del _paused_pipelines[pid]
+
+
+# 启动后台重试线程
+import threading
+def _retry_worker():
+    while True:
+        try:
+            retry_paused_pipelines()
+        except Exception as e:
+            logger.warning(f"[管家] 重试worker异常: {e}")
+        time.sleep(30)  # 每30秒检查一次
+
+_retry_thread = threading.Thread(target=_retry_worker, daemon=True, name="orchestrator-retry")
+_retry_thread.start()
     
     def _try_auto_fix(self, stage: Stage, payload: dict, error: str) -> dict:
         """运维智能体：尝试自动修复参数/内容问题，修好后重试"""
@@ -822,7 +985,7 @@ class PipelineOrchestrator:
 
         if s == Stage.DIRECTOR:
             self.ctx.results["director"] = data
-            # 提取结构化数据
+            # 提取结构化数据 — DirectorAgent 返回扁平结构，字段直接在顶层
             refined = data.get("analysis", data.get("refined_script", {}))
             if isinstance(refined, dict):
                 # P0fix: 用户已编辑角色时不覆盖
@@ -841,7 +1004,7 @@ class PipelineOrchestrator:
                     self.ctx.genre = genre_from_analysis
 
         elif s == Stage.SCRIPT:
-            self.ctx.script_text = data.get("script", data.get("outline", data.get("text", "")))
+            self.ctx.script_text = data.get("script_text", data.get("script", data.get("outline", data.get("text", ""))))
             self.ctx.title = data.get("title", self.ctx.title)
             # P0fix: 用户已编辑角色时不覆盖
             if not self.ctx.characters or len(self.ctx.characters) == 0:
@@ -859,6 +1022,13 @@ class PipelineOrchestrator:
                 chars = data.get("characters", [])
                 if chars:
                     self.ctx.characters = chars
+            # 提取服装/道具/化妆方案
+            if data.get("wardrobe_plan"):
+                self.ctx._computed["wardrobe_plan"] = data["wardrobe_plan"]
+            if data.get("prop_plan"):
+                self.ctx._computed["prop_plan"] = data["prop_plan"]
+            if data.get("makeup_plan"):
+                self.ctx._computed["makeup_plan"] = data["makeup_plan"]
 
         elif s == Stage.STORYBOARD:
             shots = data.get("shots", [])
@@ -918,13 +1088,23 @@ class PipelineOrchestrator:
             self.ctx._computed["vfx_notes"] = data.get("vfx_notes", "")
 
         elif s == Stage.SCENE:
-            images = data.get("images", data.get("scene_images", []))
+            images = data.get("scene_images", data.get("images", []))
             if images:
                 self.ctx.scene_images = images
             # P0-5: 持久化 scene_masters 到 _computed，跨 resume 复用
             scene_masters = data.get("scene_masters", {})
             if scene_masters:
                 self.ctx._computed["scene_masters"] = scene_masters
+            # 提取场景资产库供续集复用
+            if data.get("场景资产库"):
+                self.ctx._computed["scene_asset_lib"] = data["场景资产库"]
+                # 保存到数据库供续集复用
+                try:
+                    from services.scene_asset_manager import SceneAssetManager
+                    sam = SceneAssetManager()
+                    sam.save_scene_library(self.ctx.project_id, data["场景资产库"])
+                except Exception as e:
+                    logger.warning(f"[管家] 保存场景资产库失败: {e}")
 
         elif s == Stage.TTS:
             audio = data.get("audio_files", data.get("audio", []))
@@ -951,16 +1131,15 @@ class PipelineOrchestrator:
                 self.ctx.bgm_files = bgm_files
 
         elif s == Stage.VIDEO:
-            clips = data.get("clips", data.get("videos", []))
+            clips = data.get("video_clips", data.get("clips", data.get("videos", [])))
             if clips:
                 self.ctx.video_clips = clips
 
         elif s == Stage.COMPOSITE:
             video = data.get("video_url", data.get("url", data.get("output", "")))
             if video:
-                # COMPOSITE 返回的 output 是本地路径（/www/wwwroot/storage/.../final_xxx.mp4），
+                # COMPOSITE 返回的 video_url 是本地路径（/www/wwwroot/storage/.../final_xxx.mp4），
                 # 前端无法直接下载/观看。转成公网 URL。
-                # 早期代码直接存本地路径 → /status 和 run_dag 回传的 final_video 不可访问。
                 if video.startswith("/www/wwwroot/") or video.startswith("/www/wwwroot"):
                     try:
                         from agents.agent_video import _to_public_url
@@ -981,9 +1160,21 @@ class PipelineOrchestrator:
             "character_design", tasks.get("character", "")
         )
         self.ctx._computed["director_analysis"] = director_data
+        # 提取所有部门指令到 _computed，供下游 Agent 使用
+        self.ctx._computed["director_tasks"] = tasks
+        self.ctx._computed["director_storyboard_instruction"] = tasks.get("storyboard", "")
+        self.ctx._computed["director_cinematographer_instruction"] = tasks.get("cinematographer", "")
+        self.ctx._computed["director_scene_instruction"] = tasks.get("scene", "")
+        self.ctx._computed["director_audio_instruction"] = tasks.get("audio", "")
+        self.ctx._computed["director_video_instruction"] = tasks.get("video", "")
+        # 提取服装/道具/化妆/特效方案
+        self.ctx._computed["wardrobe_plan"] = director_data.get("服装设计方案", "")
+        self.ctx._computed["prop_plan"] = director_data.get("道具设计方案", "")
+        self.ctx._computed["makeup_plan"] = director_data.get("化妆设计方案", "")
+        self.ctx._computed["sfx_plan"] = director_data.get("特效设计方案", "")
 
     async def _hook_build_storyboard_context(self):
-        """为分镜 agent 拼装增强上下文: refined_characters, refined_scenes, director_beats"""
+        """为分镜 agent 拼装增强上下文: refined_characters, refined_scenes, director_beats, storyboard_instruction"""
         director_data = self.ctx.results.get("director", {})
         refined = director_data.get("analysis", director_data.get("refined_script", {}))
         if isinstance(refined, dict):
@@ -1002,6 +1193,11 @@ class PipelineOrchestrator:
             self.ctx._computed["director_beats"] = (
                 "导演节拍分析（用于为每个分镜分配importance等级）：\n" + "\n".join(blines)
             )
+        
+        # 导演给分镜师的直接指令（优先级高于 beats）
+        storyboard_instruction = self.ctx._computed.get("director_storyboard_instruction", "")
+        if storyboard_instruction:
+            self.ctx._computed["director_storyboard_instruction"] = storyboard_instruction
 
     async def _hook_build_character_voices(self):
         """从 characters 构建 character_voices 字典 → ctx.character_voices"""
@@ -1187,15 +1383,24 @@ class PipelineOrchestrator:
                     s = s.replace(w, '')
                 return s.strip('，, ')
             desc_parts = []
-            for k in ["personality", "appearance", "role_type", "trait", "description"]:
+            for k in ["personality", "appearance", "features", "role_type", "trait", "description"]:
                 v = ch.get(k, "")
                 if v and len(str(v).strip()) > 1:
                     v = _strip_face(str(v).strip())
                     if v: desc_parts.append(v)
             person_desc = "，".join(desc_parts[:3]) if desc_parts else f"{gender}性{age}"
+            
+            # 加入服装和发型信息
+            wardrobe = ch.get("wardrobe", "")
+            hair = ch.get("hair_accessory", "")
+            extra_desc = ""
+            if wardrobe:
+                extra_desc += f"，穿着{wardrobe}"
+            if hair:
+                extra_desc += f"，{hair}"
 
             prompt = (
-                f"一位中国真人，{person_desc}，{gender}性，{age}，面部特写肖像，"
+                f"一位中国真人，{person_desc}，{gender}性，{age}{extra_desc}，面部特写肖像，"
                 f"肩膀以上构图，脸部占据画面主体，正脸直视镜头，电影级光影，"
                 f"皮肤质感真实细腻，8K超高清，真人照片，真人电影摄影质感 | "
                 f"photorealistic Chinese person, close-up face portrait, head and shoulders, "
@@ -1220,11 +1425,8 @@ class PipelineOrchestrator:
                                            "prompt_hint": prompt, "force_t2i": True}
                             })
                         # 两个分支统一解析响应。
-                        # 注意：character agent 的 generate_figure 返回字段名是 figure_url
-                        # （见 agents/agent_character.py 的 AgentResult.data），
-                        # 早期代码只查 image_url/url/portrait_url → 永远拿不到，导致
-                        # has_photo 分支 url 未定义抛 UnboundLocalError、t2i 分支返回空。
-                        img_data = (r.json() or {}).get("data", {}) or {}
+                        # 注意：character agent 的 generate_figure 返回扁平结构 {success, url/figure_url, ...}
+                        img_data = (r.json() or {})
                         url = (img_data.get("figure_url")
                                or img_data.get("image_url")
                                or img_data.get("url")
@@ -1431,9 +1633,9 @@ class PipelineOrchestrator:
 
             # 持久化阶段进度 (v3)
             if success:
-                self._persist_stage(stage, "completed", data, "")
+                self._persist_stage(stage, "completed", resp, "")
             else:
-                self._persist_stage(stage, "failed", data, error)
+                self._persist_stage(stage, "failed", resp, error)
 
             # 持久化快照
             self._persist_snapshot()
@@ -1521,6 +1723,13 @@ class PipelineOrchestrator:
                     failed.add(stage)
                     # 持久化: 失败（v3: 不停止管线，标记失败继续）
                     self._persist_stage(stage, "failed", info.get("data", {}), info.get("error", ""))
+                    
+                    # 如果是导演数据缺失导致的失败，注册暂停
+                    if "导演" in info.get("error", "") or "未提供" in info.get("error", ""):
+                        register_paused_pipeline(
+                            self.pipeline_id, self.ctx, stage.value
+                        )
+                        logger.warning(f"[管家] 管线暂停，等待导演恢复: {self.pipeline_id}")
 
             # 持久化快照
             self._persist_snapshot()
