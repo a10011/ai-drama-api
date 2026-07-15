@@ -91,7 +91,13 @@ class AgentV3(ABC):
 
         # Merge upstream data so downstream agents get full context
         upstream_data = task.get("data", {})
+        # V2 agent 返回平铺结构 {success, pipeline_id, characters, ...}，直接用 result 本身
+        # V1 agent 返回嵌套结构 {success, data: {...}}，取 data
         result_data = result.get("data", {})
+        if not result_data and isinstance(result, dict):
+            # 平铺结构：排除元字段后就是业务数据
+            meta_keys = {"success", "error", "pipeline_id", "user_id", "data"}
+            result_data = {k: v for k, v in result.items() if k not in meta_keys}
         if isinstance(result_data, dict) and isinstance(upstream_data, dict):
             merged = {}
             merged.update(upstream_data)
@@ -218,7 +224,39 @@ class AgentV3(ABC):
     def _evolution_check(self, task: dict) -> list:
         """查历史反思，返回进化建议"""
         # 子类可重写：按用户+题材查过去的成功/失败记录
-        return []
+        try:
+            genre = task.get("data", {}).get("genre", "")
+            if not genre:
+                return []
+            
+            # 查相似记忆中的失败记录
+            similars = self.memory.find_similar(genre, limit=5)
+            tips = []
+            for s in similars:
+                val = s.get("value", {})
+                if isinstance(val, dict) and not val.get("success", True):
+                    tips.append("上次同类失败: " + str(val.get("error", "?")))
+            
+            # 查反思日志
+            try:
+                conn = self.memory._get_db()
+                rows = conn.execute(
+                    "SELECT content FROM agent_reflections WHERE user_id=? AND agent_type=? ORDER BY id DESC LIMIT 10",
+                    (self.user_id, self.name)
+                ).fetchall()
+                conn.close()
+                for r in rows:
+                    content = r["content"] or ""
+                    if "失败" in content and genre in content:
+                        tip = content.replace("[失败] ", "").replace("[成功] ", "")
+                        if tip not in tips:
+                            tips.append(tip)
+            except:
+                pass
+            
+            return tips
+        except Exception:
+            return []
 
     def _write_reflection(self, task: dict, result: dict):
         """进化反思：记成功经验+失败教训，越跑越聪明"""
@@ -234,18 +272,30 @@ class AgentV3(ABC):
                 for k in ["characters","scenes","scene_images","audio_files","video_segments"]:
                     v = result.get(k)
                     if v:
-                        outputs[k] = len(v)
+                        outputs[k] = len(v) if isinstance(v, (list, dict)) else str(v)[:100]
                 tip = "完成" + genre + "题材,产出:" + str(outputs)
+                score = 1.0
             else:
-                err = str(result.get("error", "?"))[:80]
+                err = str(result.get("error", "?"))[:200]
                 tip = "失败原因:" + err + "。下次" + genre + "题材需注意规避。"
+                score = -1.0
 
             self.memory.save(
                 {"tip": tip, "genre": genre, "ok": ok, "pipe": pipeline_id[:20]},
                 "reflection", str(int(time.time())),
                 tags=self.name + "," + genre,
-                score=1 if ok else -1
+                score=score
             )
+            
+            # 写反思日志到 agent_reflections 表
+            try:
+                self.memory.reflect(
+                    self.name + "_" + genre,
+                    f"[{'成功' if ok else '失败'}] {tip}"
+                )
+            except:
+                pass
+                
             logger.info("[" + self.name + "] 反思: " + tip[:60])
         except Exception:
             pass
