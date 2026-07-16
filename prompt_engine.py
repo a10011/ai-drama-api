@@ -117,9 +117,9 @@ def build_video_prompt(shot, audio_text='', genre='现代', reference_image=Fals
     desc = shot.get('description', shot.get('content', ''))
     focus_char = shot.get('focus_character', '')
     location = shot.get('location', '')
-    cam = 'subtle camera movement, slow push in'
-    lighting = 'cinematic lighting, short drama cinematography'
-    style = 'photorealistic, consistent appearance, 8K ultra HD, natural skin texture, film grain, authentic human skin pores, no beauty filter, no cartoon, no anime, no 3D render'
+    cam = 'slow cinematic tracking shot, subtle camera movement'
+    lighting = 'cinematic lighting, short drama cinematography, dramatic sunset lighting'
+    style = 'photorealistic, consistent appearance, 8K ultra HD, natural skin texture, film grain, authentic human skin pores, no beauty filter, no cartoon, no anime, no 3D render, movie quality'
     
     # 添加导演指定的特效和道具
     extra = []
@@ -130,16 +130,31 @@ def build_video_prompt(shot, audio_text='', genre='现代', reference_image=Fals
     extra_str = ' ' + ' '.join(extra) if extra else ''
     
     if reference_image:
-        motion_parts = ['subtle breathing', 'natural blinking']
+        # 图生视频：描述哪些运动，保持哪些稳定
+        motion_parts = ['subtle breathing motion', 'hair moving gently in the wind']
         if audio_text:
-            motion_parts.extend(['accurate lip sync matching dialogue', 'mouth movements synchronized with speech', 'natural facial expression while talking'])
-        stable = f'keeping face of {focus_char} consistent' if focus_char else 'maintaining appearance'
+            motion_parts.extend([
+                'accurate lip sync matching dialogue',
+                'mouth movements synchronized with speech',
+                'natural facial expression while talking',
+                'subtle head movement',
+            ])
+        stable_parts = []
+        if focus_char:
+            stable_parts.append(f'keeping face of {focus_char} consistent')
+        stable_parts.append('keeping outfit consistent')
+        stable = ', '.join(stable_parts) if stable_parts else 'maintaining appearance'
         motion_str = ', '.join(motion_parts)
-        return f'Animate with {motion_str}, {cam}, {lighting}, while {stable}. {style}{extra_str}.'
+        return f'{motion_str}, background lights flickering softly, {cam}, {lighting}, {style}, {stable}. {extra_str}.'
     
+    # 文生视频：主体+动作+场景+镜头+光线+风格
     action_parts = ['subtle natural movement']
     if audio_text:
-        action_parts.extend(['speaking with accurate lip sync', 'mouth movements synchronized with dialogue', 'natural facial expression while talking'])
+        action_parts.extend([
+            'speaking with accurate lip sync',
+            'mouth movements synchronized with dialogue',
+            'natural facial expression while talking',
+        ])
     scene = location if location else desc
     action_str = ', '.join(action_parts)
-    return f'{focus_char or character}, {action_str}, {scene}, {cam}, {lighting}, {style}{extra_str}.'
+    return f'{focus_char or character}, {action_str}, {scene}, {cam}, {lighting}, {style}. {extra_str}'

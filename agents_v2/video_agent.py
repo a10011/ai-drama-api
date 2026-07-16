@@ -109,6 +109,7 @@ class VideoAgent(AgentV3):
                 shot_duration = 3
             
             try:
+                # Agnes Video V2.0: 异步任务，先创建再轮询
                 result = agnes.generate_video(
                     prompt=prompt,
                     image_url=img_url,
@@ -124,6 +125,19 @@ class VideoAgent(AgentV3):
                 if result.get("success"):
                     video_url = result.get("video_url", "")
                     if video_url:
+                        # 下载到本地存储
+                        import requests, os, hashlib
+                        try:
+                            os.makedirs('/www/wwwroot/storage/videos', exist_ok=True)
+                            r = requests.get(video_url, timeout=120)
+                            fname = f'shot{shot_num}_{hashlib.md5(video_url.encode()).hexdigest()[:8]}.mp4'
+                            fpath = f'/www/wwwroot/storage/videos/{fname}'
+                            with open(fpath, 'wb') as f:
+                                f.write(r.content)
+                            logger.info(f"[VideoAgent] 镜{shot_num} 视频已下载到 {fpath}")
+                        except Exception as e:
+                            logger.warning(f"[VideoAgent] 镜{shot_num} 下载失败: {e}")
+                        
                         video_clips.append({
                             "shot_num": shot_num,
                             "video_url": video_url,
