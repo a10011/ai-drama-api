@@ -53,7 +53,7 @@ class StoryboardAgent(AgentV3):
             ])
 
         prompt = (
-            f"══════ 剧本 ══════\n{script[:12000]}\n\n"
+            f"══════ 剧本 ══════\n{script}\n\n"
             f"{dir_brief}\n{char_info}\n"
             f"题材: {genre}\n\n"
             f"请严格按导演指令拆分分镜。镜头数量和时长由导演指令决定，不要自行计算。严禁添加剧本中没有的镜头。"

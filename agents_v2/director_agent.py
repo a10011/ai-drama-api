@@ -183,7 +183,7 @@ class DirectorAgent(AgentV3):
         if evolution_tips:
             memory_context = "\n\n【历史经验教训】\n" + "\n".join(evolution_tips)
 
-        prompt = f"剧本：\n{script[:8000]}\n\n题材参考：{genre_hint or '都市'}\n{memory_context}\n请输出JSON。"
+        prompt = f"剧本：\n{script}\n\n题材参考：{genre_hint or '都市'}\n{memory_context}\n请输出JSON。"
 
         try:
             result = self.call_with_safety_retry(
@@ -191,7 +191,7 @@ class DirectorAgent(AgentV3):
                 UnifiedModel.llm,
                 prompt=prompt,
                 system=SYSTEM_PROMPT,
-                max_tokens=4096,
+                max_tokens=12288,
                 timeout=300,
             )
             content = result.get("text", "{}")
