@@ -310,6 +310,27 @@ class AgentV3(ABC):
             "pipeline_id": result.get("pipeline_id", ""), "stage": self.name,
             "result": result, "success": result.get("success", False),
         })
+        # 自动注册 asset：把 agent 产出数据存入 pipeline_assets 表
+        try:
+            pid = result.get("pipeline_id", "")
+            if pid:
+                meta_keys = {"success", "error", "pipeline_id", "user_id", "data"}
+                business_data = {k: v for k, v in result.items() if k not in meta_keys}
+                if business_data:
+                    import json
+                    json_str = json.dumps(business_data, ensure_ascii=False)
+                    if len(json_str) > 50000:
+                        import os, hashlib
+                        os.makedirs('/www/wwwroot/storage/assets', exist_ok=True)
+                        fname = f'{self.name}_{pid[:12]}_{hashlib.md5(json_str.encode()).hexdigest()[:8]}.json'
+                        fpath = f'/www/wwwroot/storage/assets/{fname}'
+                        with open(fpath, 'w', encoding='utf-8') as f:
+                            f.write(json_str)
+                        self.register_asset(self.name, file_path=fpath, meta={"pipeline_id": pid, "size": len(json_str)})
+                    else:
+                        self.register_asset(self.name, url=json_str, meta={"pipeline_id": pid, "size": len(json_str)})
+        except Exception as e:
+            logger.warning(f"[Worker:{self.name}] asset register failed: {e}")
         # push next stage
         try:
             pid = result.get("pipeline_id", "")
