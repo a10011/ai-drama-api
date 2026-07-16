@@ -919,8 +919,6 @@ def _retry_worker():
             logger.warning(f"[管家] 重试worker异常: {e}")
         time.sleep(30)  # 每30秒检查一次
 
-_retry_thread = threading.Thread(target=_retry_worker, daemon=True, name="orchestrator-retry")
-_retry_thread.start()
     
     def _try_auto_fix(self, stage: Stage, payload: dict, error: str) -> dict:
         """运维智能体：尝试自动修复参数/内容问题，修好后重试"""
@@ -1805,3 +1803,6 @@ def create_context(
         characters=characters or [],
         user_id=user_id,
     )
+
+_retry_thread = threading.Thread(target=_retry_worker, daemon=True, name="orchestrator-retry")
+_retry_thread.start()
