@@ -1051,7 +1051,10 @@ async def step_pipeline(project_id: str, body: StepRequest, request: Request):
         v2req.characters = params["characters"]
     
     logger.info(f"[V2] step '{body.stage}' → 启动完整V2管道 project={project_id}, chars={len(v2req.characters)}")
-    return await v2_start(v2req, request)
+    result = await v2_start(v2req, request)
+    # 返回 v2_pipeline_id 供前端轮询
+    result["v2_pipeline_id"] = result.get("pipeline_id", "")
+    return result
 
 
 @router.get("/step-status/{project_id}")
