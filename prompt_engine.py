@@ -18,18 +18,28 @@ def build_portrait_prompt(character, genre='现代'):
     name = character.get('name', '')
     gender = character.get('gender', '男')
     age = str(character.get('age', '25')).replace('岁','').strip()
-    appearance = character.get('appearance', '')
+    features = character.get('features', '')
+    wardrobe = character.get('wardrobe', '')
+    hair = character.get('hair_accessory', '')
     role_type = character.get('role_type', '主角')
     gender_en = 'male' if gender in ('男','male') else 'female'
     role_map = {'主角':'short drama lead actor','配角':'supporting actor','反派':'antagonist'}
     role_desc = role_map.get(role_type, 'short drama actor')
-    face = f'{gender_en}, {age} years old, Chinese'
-    if appearance: face += f', {appearance}'
-    wardrobe_map = {'现代':'modern casual clothing','都市':'urban fashion','古装':'traditional Chinese hanfu','仙侠':'Chinese xianxia robes','豪门':'luxury designer fashion','校园':'school uniform','职场':'business formal'}
-    wardrobe = wardrobe_map.get(genre, 'modern clothing')
+    
+    face_parts = [f'{gender_en}, {age} years old, Chinese']
+    if features: face_parts.append(features)
+    if hair: face_parts.append(f'hair: {hair}')
+    face = ', '.join(face_parts)
+    
+    ward_map = {'现代':'modern casual clothing','都市':'urban fashion','古装':'traditional Chinese hanfu','仙侠':'Chinese xianxia robes','豪门':'luxury designer fashion','校园':'school uniform','职场':'business formal'}
+    if wardrobe:
+        ward = wardrobe
+    else:
+        ward = ward_map.get(genre, 'modern clothing')
+    
     camera = 'vertical 9:16 portrait, short drama cinematography, studio soft lighting, natural skin texture, no heavy makeup, no beauty filter, realistic pores, authentic human skin, cinematic color grading, raw camera quality, half-body close-up, front-facing, 8K ultra HD, photorealism'
     negative = 'cartoon, anime, 3D render, CGI, illustration, painting, plastic skin, doll face, exaggerated features, heavy makeup, over-beauty-filter, blurry, distorted face, deformed, extra limbs'
-    return f'{role_desc}, {face}. {wardrobe}. {camera}. Negative: {negative}'
+    return f'{role_desc}, {face}. {ward}. {camera}. Negative: {negative}'
 
 def build_scene_prompt(shot, genre='现代', character_portraits=None, director_scene_instruction='', wardrobe_plan='', prop_plan='', makeup_plan='', sfx_plan='', scene_asset_lib=None):
     desc = shot.get('description', shot.get('content', ''))
@@ -42,7 +52,7 @@ def build_scene_prompt(shot, genre='现代', character_portraits=None, director_
     composition = shot_map.get(shot_type, 'medium shot')
     light_map = {'悲伤':'moody cool','愤怒':'harsh dramatic','浪漫':'warm golden','悬疑':'low key','紧张':'stark contrast','平静':'natural soft'}
     lighting = light_map.get(emotion, 'cinematic')
-    quality = 'vertical 9:16, short drama cinematography, photorealistic, 8K, natural skin'
+    quality = 'vertical 9:16 ratio, short drama cinematography, photorealistic, 8K ultra HD, natural skin texture, cinematic lighting, film grain, authentic human skin pores, no beauty filter, no cartoon, no anime, no 3D render'
     
     # 导演场景指令叠加
     director_hint = ''
@@ -107,9 +117,9 @@ def build_video_prompt(shot, audio_text='', genre='现代', reference_image=Fals
     desc = shot.get('description', shot.get('content', ''))
     focus_char = shot.get('focus_character', '')
     location = shot.get('location', '')
-    cam = 'subtle camera movement'
-    lighting = 'short drama cinematography'
-    style = 'photorealistic, consistent appearance, 8K'
+    cam = 'subtle camera movement, slow push in'
+    lighting = 'cinematic lighting, short drama cinematography'
+    style = 'photorealistic, consistent appearance, 8K ultra HD, natural skin texture, film grain, authentic human skin pores, no beauty filter, no cartoon, no anime, no 3D render'
     
     # 添加导演指定的特效和道具
     extra = []

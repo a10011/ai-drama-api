@@ -499,3 +499,5 @@ app.include_router(composite_progress.router)
 app.include_router(pipeline_v2.router, tags=["pipeline-v2"])
 
 # Hermes 独立剧本工作流
+from routers.missing_endpoints import router as missing_router
+app.include_router(missing_router)

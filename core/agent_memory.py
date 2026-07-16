@@ -56,6 +56,10 @@ class AgentMemory:
         self.user_id = user_id
         self.agent_type = agent_type
     
+    def _get_db(self):
+        """暴露数据库连接（供外部查询反思日志）"""
+        return _get_db()
+    
     def _make_key(self, *parts) -> str:
         raw = ":".join(str(p) for p in parts)
         return hashlib.md5(raw.encode()).hexdigest()

@@ -252,8 +252,8 @@ class ScriptAgent(AgentV3):
         # 解析季设计 JSON
         season_plan = self._safe_json_parse(season_text)
         if not season_plan or not season_plan.get("characters") or not season_plan.get("episode_outlines"):
-            logger.warning(f"[ScriptAgent] 季设计JSON解析失败，降级为单集模式")
-            return self._legacy_fallback(title, genre, synopsis, knowledge, pipeline_id, style_hint)
+            logger.warning(f"[ScriptAgent] 季设计JSON解析失败，返回错误")
+            return {"success": False, "error": "季设计JSON解析失败", "pipeline_id": pipeline_id}
 
         # ── 第二步：扩展第一集 ──
         ep1_outline = season_plan["episode_outlines"][0] if season_plan.get("episode_outlines") else {}
@@ -280,6 +280,9 @@ class ScriptAgent(AgentV3):
         ep1_text = ep1_result.get("text", "")
         ep1_text = clean_text(ep1_text)
         ep1_data = self._safe_json_parse(ep1_text)
+        if not ep1_data:
+            logger.warning(f"[ScriptAgent] 第一集JSON解析失败")
+            return {"success": False, "error": "第一集剧本JSON解析失败", "pipeline_id": pipeline_id}
 
         # ── 合并输出 ──
         chars = season_plan.get("characters", [])
@@ -302,18 +305,12 @@ class ScriptAgent(AgentV3):
             "pipeline_id": pipeline_id,
             "title": title,
             "genre": genre,
-
-            # 季设计
             "format": "season",
             "season_plan": season_plan,
-
-            # 第一集剧本（兼容下游）
             "script_text": json.dumps(ep1_data if ep1_data else season_plan, ensure_ascii=False),
             "characters": chars,
             "scenes": scenes,
             "shots": scenes,
-
-            # 季相关元数据
             "_episode_expanded": bool(ep1_data),
             "_total_episodes": season_plan.get("total_episodes", 0),
             "_next_season_hooks": season_plan.get("next_season_hooks", []),
@@ -324,6 +321,22 @@ class ScriptAgent(AgentV3):
             "title": title,
             "episodes": season_plan.get("total_episodes", 0),
         })
+        
+        # 记录用量
+        try:
+            from services.usage_tracker import log_usage
+            log_usage(
+                model_name=task.get("model", "agnes-2.0-flash") or "deepseek-chat",
+                provider="agnes",
+                model_type="llm",
+                status="success",
+                user_id=task.get("data", {}).get("user_id", 0),
+                drama_id=pipeline_id,
+                char_count=len(full_script) if full_script else len(synopsis),
+            )
+        except Exception as e:
+            logger.warning(f"[ScriptAgent] 记录用量失败: {e}")
+        
         return result
 
     def _safe_json_parse(self, text: str) -> dict | None:
@@ -349,62 +362,6 @@ class ScriptAgent(AgentV3):
             except json.JSONDecodeError:
                 pass
         return None
-
-    def _legacy_fallback(self, title, genre, synopsis, knowledge, pipeline_id, style_hint):
-        """降级：单集短剧模式（当季设计 JSON 解析失败时）"""
-        user_prompt = (
-            f"题材: {genre}\n"
-            f"标题: {title}\n"
-            f"风格: {style_hint}\n"
-            f"概要: {synopsis}\n\n"
-            "请输出一个完整的短剧剧本JSON。包含characters和scenes字段，"
-            "每个scene包含多个shots。本集时长约180秒。\n\n"
-            "JSON结构：\n"
-            "{\n"
-            '  "characters": [{"name":,"role":,"gender":,"age":,"appearance":,"personality":,"background":,"voice_style":}],\n'
-            '  "scenes": [{"scene_id":,"location":,"time":,"shots":[{"shot_id":,"type":,"content":,"dialogue":,"duration_seconds":}]}],\n'
-            '  "title": ""\n'
-            "}"
-        )
-        system_prompt = "你是一位专业的短剧编剧。输出严格的JSON剧本。"
-        result = self.call_with_safety_retry(
-            task.get("model", "agnes-2.0-flash"), 3,
-            UnifiedModel.llm,
-            prompt=user_prompt,
-            system=system_prompt,
-            max_tokens=8192,
-            timeout=120,
-        )
-        script_text = result.get("text", "")
-        if not script_text:
-            import logging; logging.getLogger(__name__).info("[ScriptAgent] returning data keys: " + str(list(locals().get("result",{}).keys()))); return {"success": False, "error": "剧本生成失败", "pipeline_id": pipeline_id}
-        script_text = clean_text(script_text)
-        parsed = self._safe_json_parse(script_text) or {}
-        chars = parsed.get("characters", [])
-        scenes = parsed.get("scenes", [])
-        flat_shots = []
-        for sc in scenes:
-            shs = sc.get("shots", [])
-            for sh in shs:
-                sh["scene_id"] = sc.get("scene_id", 0)
-                sh["location"] = sc.get("location", "")
-                flat_shots.append(sh)
-
-        self.log_asset("script", meta={"pipeline_id": pipeline_id, "title": title})
-        import logging; logging.getLogger(__name__).info("[ScriptAgent] returning data keys: " + str(list(locals().get("result",{}).keys()))); return {
-            "success": True,
-            "pipeline_id": pipeline_id,
-            "format": "single",
-            "script_text": script_text,
-            "characters": chars,
-            "scenes": flat_shots or scenes,
-            "shots": flat_shots or scenes,
-            "title": title,
-            "genre": genre,
-            "season_plan": None,
-            "_total_episodes": 1,
-            "_next_season_hooks": [],
-        }
 
     # ── 继承的 AgentV3 记忆/进化方法 ──
 

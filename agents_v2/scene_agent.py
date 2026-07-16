@@ -19,9 +19,30 @@ class SceneAgent(AgentV3):
 
     def execute(self, task: dict) -> dict:
         data = task.get("data", {})
-        shots = data.get("shots", data.get("scenes", data.get("storyboard", [])))
+        shots = data.get("shots", data.get("storyboard", []))
         genre = data.get("genre", "现代")
         pipeline_id = task.get("pipeline_id", "")
+        director_scene_instruction = data.get("director_scene_instruction", "")
+        visual_style = data.get("visual_style", "")
+        wardrobe_plan = data.get("wardrobe_plan", "")
+        prop_plan = data.get("prop_plan", "")
+        makeup_plan = data.get("makeup_plan", "")
+        sfx_plan = data.get("sfx_plan", "")
+        scene_asset_lib = data.get("场景资产库", {})
+        
+        # 如果是续集，尝试从数据库加载上一集的场景资产库
+        if not scene_asset_lib and task.get("data", {}).get("episode", 1) > 1:
+            try:
+                from services.scene_asset_manager import SceneAssetManager
+                sam = SceneAssetManager()
+                project_id = task.get("data", {}).get("project_id", "")
+                if project_id:
+                    prev_asset_lib = sam.get_scene_library(project_id)
+                    if prev_asset_lib:
+                        logger.info(f"[SceneAgent] 从数据库加载上一集场景资产库")
+                        scene_asset_lib = prev_asset_lib
+            except Exception as e:
+                logger.warning(f"[SceneAgent] 加载场景资产库失败: {e}")
 
         # 获取角色肖像映射（用于人脸锁定）
         portraits = data.get("portraits", [])
@@ -32,9 +53,9 @@ class SceneAgent(AgentV3):
             if name and url:
                 char_portrait_map[name] = url
 
+        # 必须有分镜数据
         if not shots:
-            logger.warning("[SceneAgent] 无分镜数据")
-            return {"success": True, "scene_images": [], "pipeline_id": pipeline_id, "storyboard": []}
+            return {"success": False, "error": "导演未提供分镜数据", "pipeline_id": pipeline_id}
 
         # 去重：同场景+同景别=复用，省token
         scene_images = []
@@ -59,7 +80,7 @@ class SceneAgent(AgentV3):
                 _time.sleep(7)
             
             # 构建场景图提示词（自动判断i2i还是t2i）
-            prompt_text, ref_url = build_scene_prompt(shot, genre, char_portrait_map)
+            prompt_text, ref_url = build_scene_prompt(shot, genre, char_portrait_map, director_scene_instruction, wardrobe_plan, prop_plan, makeup_plan, sfx_plan, scene_asset_lib)
             
             if ref_url:
                 # 图生图模式：用人脸参考图锁定角色
@@ -86,6 +107,21 @@ class SceneAgent(AgentV3):
             else:
                 logger.warning(f"[SceneAgent] 镜{shot_num} 失败: {result.get('error','')[:80]}")
 
+        # 记录用量
+        try:
+            from services.usage_tracker import log_usage
+            log_usage(
+                model_name="agnes",
+                provider="agnes",
+                model_type="image",
+                status="success",
+                user_id=task.get("user_id", 0),
+                drama_id=pipeline_id,
+                image_count=len(scene_images),
+            )
+        except Exception as e:
+            logger.warning(f"[SceneAgent] 记录用量失败: {e}")
+        
         return {
             "success": True,
             "scene_images": scene_images,
@@ -95,13 +131,16 @@ class SceneAgent(AgentV3):
         }
 
     def _generate_t2i(self, prompt: str, pipeline_id: str, shot_num: int, max_retries: int = 3) -> dict:
-        """文生图，自动503重试"""
+        """文生图，自动503重试 — 使用2K+9:16竖屏"""
         for attempt in range(max_retries):
             try:
-                result = UnifiedModel.image(
+                result = self.call_with_safety_retry(
+                    None, 1,
+                    UnifiedModel.image,
                     prompt=prompt,
                     preferred="agnes",
-                    size="1024x1536",  # 竖屏3:2，适合手机观看
+                    size="2K",
+                    ratio="9:16",
                 )
                 url = result.url if hasattr(result, 'url') else result.get("url", "")
                 if url:
@@ -121,13 +160,16 @@ class SceneAgent(AgentV3):
         return {"url": "", "error": "max retries"}
 
     def _generate_i2i(self, prompt: str, ref_url: str, pipeline_id: str, shot_num: int, max_retries: int = 3) -> dict:
-        """图生图：用人脸参考图保持角色一致性"""
+        """图生图：用人脸参考图保持角色一致性 — 使用2K+9:16竖屏"""
         for attempt in range(max_retries):
             try:
-                result = UnifiedModel.image(
+                result = self.call_with_safety_retry(
+                    None, 1,
+                    UnifiedModel.image,
                     prompt=prompt,
                     preferred="agnes",
-                    size="1024x1536",
+                    size="2K",
+                    ratio="9:16",
                     reference_image=ref_url,
                 )
                 url = result.url if hasattr(result, 'url') else result.get("url", "")
