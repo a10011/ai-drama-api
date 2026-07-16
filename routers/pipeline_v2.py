@@ -32,6 +32,7 @@ class PipelineStartRequest(BaseModel):
     user_id: int = 0
     episode: int = 1
     project_id: str = ""
+    characters: list = []
 
 
 @router.post("/start")
@@ -96,6 +97,7 @@ async def start(req: PipelineStartRequest, request: Request):
         "project_id": project_id,
         "episode": req.episode,
         "existing_characters": existing_chars,
+        "characters": req.characters if req.characters else existing_chars,
     })
 
     return {

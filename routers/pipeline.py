@@ -1046,8 +1046,11 @@ async def step_pipeline(project_id: str, body: StepRequest, request: Request):
     v2req.genre = v2req.genre or params.get("genre", "") or "现代"
     v2req.synopsis = (v2req.script_text or "")[:100]
     v2req.title = v2req.title or (v2req.script_text or "短剧")[:20]
+    # 传递角色数据
+    if "characters" in params:
+        v2req.characters = params["characters"]
     
-    logger.info(f"[V2] step '{body.stage}' → 启动完整V2管道 project={project_id}")
+    logger.info(f"[V2] step '{body.stage}' → 启动完整V2管道 project={project_id}, chars={len(v2req.characters)}")
     return await v2_start(v2req, request)
 
 
