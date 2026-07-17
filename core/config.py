@@ -100,8 +100,8 @@ class ProviderConfig:
 @dataclass
 class Config:
     """全局配置 — 线程安全单例"""
-    environment: Environment = Environment.DEVELOPMENT
-    debug: bool = True
+    environment: Environment = Environment.PRODUCTION
+    debug: bool = False
     server: ServerConfig = field(default_factory=ServerConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     providers: ProviderConfig = field(default_factory=ProviderConfig)
@@ -148,8 +148,8 @@ class Config:
         config = object.__new__(cls)
         
         # Initialize all fields manually to avoid __post_init__ recursion
-        config.environment = Environment.DEVELOPMENT
-        config.debug = True
+        config.environment = Environment.PRODUCTION
+        config.debug = False
         config.server = ServerConfig()
         config.database = DatabaseConfig()
         config.providers = ProviderConfig()

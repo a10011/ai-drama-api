@@ -1,3 +1,4 @@
+import os
 """企业微信消息接收 — URL验证 + 消息回调"""
 import hashlib
 import base64
@@ -10,8 +11,8 @@ from fastapi.responses import PlainTextResponse
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/wechat", tags=["wechat"])
 
-WECHAT_TOKEN = "PBztR9dqJpoATqx"
-WECHAT_ENCODING_AES_KEY = "rqbzR81aOs1CyppYJtqjOFfFFd2a9oAJclokez34Jyt"
+WECHAT_TOKEN = os.environ.get("WECHAT_TOKEN", "")
+WECHAT_ENCODING_AES_KEY = os.environ.get("WECHAT_ENCODING_AES_KEY", "")
 WECHAT_CORP_ID = ""  # 企业ID，消息解密时需要
 
 def _sha1_sign(*args) -> str:
