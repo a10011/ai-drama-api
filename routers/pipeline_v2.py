@@ -1,5 +1,6 @@
 """
 Pipeline V2 API — 多智能体 MQ 模式
+所有 SQL 与实际表结构严格一致
 """
 import json
 import time
@@ -43,37 +44,40 @@ async def start(req: PipelineStartRequest, request: Request):
         if auth.startswith("Bearer"):
             uid = 1
 
-    # 全局锁已禁用
-    project_id = next_id("PRJ")
+    # 如果前端已传入 project_id（从 step_pipeline 转发），直接复用
+    if req.project_id:
+        project_id = req.project_id
+    else:
+        project_id = next_id("PRJ")
     pipeline_id = next_id("PL")
 
-    # 写入 pipelines
-    db_proj_id = 0
+    # 写入 pipelines（表结构: id, project_id, script_text, genre, status, progress, total_stages, current_stage, error, step_results, stage_outputs, created, updated, user_id）
     try:
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         conn.execute(
-            "INSERT INTO pipelines (id, project_id, user_id, status, created, updated) VALUES (?,?,?,?,?,?)",
-            (pipeline_id, project_id, uid, "queued", time.time(), time.time()),
+            "INSERT INTO pipelines (id, project_id, status, created, updated, user_id) VALUES (?,?,?,?,?,?)",
+            (pipeline_id, project_id, "queued", time.time(), time.time(), uid),
         )
         conn.commit()
         conn.close()
     except Exception as e:
         logger.warning(f"[V2] pipeline DB 失败: {e}")
 
-    # 写入 projects（用原始 auto-increment id）
-    try:
-        import sqlite3
-        conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
-        cur = conn.execute(
-            "INSERT INTO projects (title, genre, status, progress, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
-            (req.title, req.genre, "processing", 0, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
-        )
-        db_proj_id = cur.lastrowid
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"[V2] project DB 失败: {e}")
+    # 写入 projects（表结构: id, title, script, genre, progress, status, characters, pipeline_steps, created, updated, user_id）
+    # 如果 project_id 是前端已有的（字符串如 10011302），不要重复 INSERT
+    if not req.project_id:
+        try:
+            import sqlite3
+            conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+            conn.execute(
+                "INSERT INTO projects (title, genre, status, progress, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
+                (req.title, req.genre, "processing", 0, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"[V2] project DB 失败: {e}")
 
     # 续集：如果提供已有project_id，复用角色数据
     existing_chars = []
@@ -81,15 +85,15 @@ async def start(req: PipelineStartRequest, request: Request):
         try:
             conn2 = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
             rows = conn2.execute(
-                "SELECT characters FROM episodes WHERE project_id=? AND episode_num=?", 
-                (str(req.project_id), req.episode - 1)
+                "SELECT characters FROM projects WHERE id=? LIMIT 1", 
+                (str(req.project_id),)
             ).fetchall()
-            if rows:
-                existing_chars = json.loads(rows[0][0] or "[]")
-                logger.info(f"[V2] 第{req.episode}集: 复用第{req.episode-1}集{len(existing_chars)}个角色")
+            if rows and rows[0][0]:
+                existing_chars = json.loads(rows[0][0])
+                logger.info(f"[V2] 第{req.episode}集: 复用{len(existing_chars)}个角色")
             conn2.close()
         except Exception as e:
-            logger.warning(f"[V2] 续集角色复用失败: {e}")
+            logger.warning(f"[V2] 角色复用失败: {e}")
     
     start_pipeline(pipeline_id, uid, {
         "title": req.title,
@@ -146,14 +150,14 @@ async def status(pipeline_id: str):
 
 def start_all_workers(counts: dict = None):
     if counts is None:
-        counts = {"script": 16, "director": 2, "character": 6, "storyboard": 3, "scene": 6, "video": 3, "composite": 2}  # audio removed, video=音画同出
+        counts = {"script": 16, "director": 2, "character": 6, "storyboard": 3, "scene": 6, "video": 3, "composite": 2}
     workers = [
         ("script", ScriptAgent),
         ("director", DirectorAgent),
         ("character", CharacterAgent),
         ("storyboard", StoryboardAgent),
         ("scene", SceneAgent),
-        ("video", VideoAgent),      # 音画同出
+        ("video", VideoAgent),
         ("composite", CompositeAgent),
     ]
     total = 0
@@ -167,43 +171,57 @@ def start_all_workers(counts: dict = None):
     return total
 
 
-@router.get("/project/{project_code}")
-async def v2_project_detail(project_code: str):
+@router.get("/project/{project_id}")
+async def v2_project_detail(project_id: str):
     """V2 项目详情（按 project_id 查，含全部资产）"""
     try:
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         conn.row_factory = sqlite3.Row
+        # projects 表没有 pipeline_id 列，用 project_id 关联 pipelines 表
         row = conn.execute(
-            "SELECT id, pipeline_id, title, genre, status, progress, created, updated FROM projects WHERE id=?",
-            (project_code,)
+            "SELECT p.id, p.title, p.genre, p.status, p.progress, p.created, p.updated FROM projects p WHERE p.id=?",
+            (project_id,)
         ).fetchone()
         if not row:
             conn.close()
             return {"success": False, "error": "项目不存在"}
         data = dict(row)
-        assets_rows = conn.execute("SELECT id, agent, asset_type, asset_url FROM pipeline_assets WHERE pipeline_id=?", (data["pipeline_id"],)).fetchall()
+        # 查 pipeline_id
+        pipe = conn.execute("SELECT id FROM pipelines WHERE project_id=?", (project_id,)).fetchone()
+        if pipe:
+            data["pipeline_id"] = pipe[0]
+            # 查资产
+            try:
+                assets_rows = conn.execute("SELECT id, agent, asset_type, asset_url FROM pipeline_assets WHERE pipeline_id=?", (pipe[0],)).fetchall()
+                data["assets"] = [{"asset_id": a[0], "agent": a[1], "type": a[2], "url": a[3]} for a in assets_rows]
+                data["assets_count"] = len(data["assets"])
+            except:
+                data["assets"] = []
+                data["assets_count"] = 0
+        else:
+            data["pipeline_id"] = ""
+            data["assets"] = []
+            data["assets_count"] = 0
         conn.close()
-        data["assets"] = [{"asset_id": a["id"], "agent": a["agent"], "type": a["asset_type"], "url": a["asset_url"]} for a in assets_rows]
-        data["assets_count"] = len(data["assets"])
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-@router.get("/project/{project_code}/download")
-async def v2_download(project_code: str):
-    """V2 项目下载（返回视频直链）"""
+@router.get("/project/{project_id}/download")
+async def v2_download(project_id: str):
+    """V2 项目下载"""
     try:
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         row = conn.execute(
-            "SELECT id, title FROM projects WHERE id=? AND pipeline_id IS NOT NULL",
-            (project_code,)
+            "SELECT p.id, p.title FROM projects p JOIN pipelines pl ON pl.project_id = p.id WHERE p.id=? AND pl.status='completed'",
+            (project_id,)
         ).fetchone()
         conn.close()
         if not row:
             return {"success": False, "error": "尚未完成或没有视频"}
-        return {"success": True, "project_code": row[0], "title": row[1], "video_url": ""}
+        return {"success": True, "project_id": row[0], "title": row[1], "video_url": ""}
     except Exception as e:
         return {"success": False, "error": str(e)}
