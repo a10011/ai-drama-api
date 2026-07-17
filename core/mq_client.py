@@ -51,6 +51,11 @@ def _init():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_queue_status ON pipeline_tasks(queue, status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_created ON pipeline_tasks(queue, created_at) WHERE status='pending'")
+        # 迁移：如果旧表没有 payload 列，添加
+        try:
+            conn.execute("ALTER TABLE pipeline_tasks ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'")
+        except:
+            pass  # 已存在或表是新创建的
         conn.commit()
         conn.close()
     except Exception as e:
