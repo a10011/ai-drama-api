@@ -10,6 +10,7 @@ import os
 import ssl
 import hashlib
 import urllib.request
+import threading
 from utils.path_util import local_path_to_url as _local_path_to_url_legacy
 from utils.storage_path import figure_path, local_to_url
 from app_config import BASE_URL
