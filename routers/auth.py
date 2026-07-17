@@ -109,7 +109,7 @@ async def login_or_register(request: Request):
     from app_db import fetchone, execute
     import hashlib, os as _os
     
-    row = fetchone("SELECT id,username,password,token FROM users WHERE username = ?", (phone,))
+    row = fetchone("SELECT id,username,password_hash,token FROM users WHERE username = ?", (phone,))
     if row:
         # 手机号已存在 -> 登录
         token = row["token"] if row["token"] else "tok_" + hashlib.sha256(_os.urandom(32)).hexdigest()[:40]
@@ -122,12 +122,12 @@ async def login_or_register(request: Request):
         pw_hash = bcrypt.hashpw(random_pw.encode(), bcrypt.gensalt(rounds=4)).decode()
         token = "tok_" + hashlib.sha256(_os.urandom(32)).hexdigest()[:40]
         execute(
-            "INSERT INTO users (username, password, token, created) VALUES (?, ?, ?, ?)",
+            "INSERT INTO users (username, password_hash, token, created_at) VALUES (?, ?, ?, ?)",
             (phone, pw_hash, token, time.time()))
         execute(
             "INSERT OR IGNORE INTO user_balance (user_id, balance, total_charged, total_spent, updated) VALUES ((SELECT id FROM users WHERE username=?), 0, 0, 0, ?)",
             (phone, time.time()))
-        row = fetchone("SELECT id,username,password,token FROM users WHERE username = ?", (phone,))
+        row = fetchone("SELECT id,username,password_hash,token FROM users WHERE username = ?", (phone,))
         if row:
             return {"success": True, "data": {"access_token": token, "username": row["username"], "user_id": row["id"]}}
         return {"success": True, "data": {"access_token": token, "username": phone, "user_id": 0}}
@@ -141,7 +141,7 @@ async def get_me(request: Request):
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT id, username, email, created, COALESCE(tier,'free') as tier, COALESCE(avatar_url,'') as avatar_url FROM users WHERE token = ?",
+            "SELECT id, username, email, created_at, COALESCE(tier,'free') as tier, COALESCE(avatar_url,'') as avatar_url FROM users WHERE token = ?",
             (token,)
         ).fetchone()
         if not row:
@@ -171,12 +171,12 @@ async def register_alias(request: Request):
             # [安全修复] 新用户密码用 bcrypt 存储，不再用弱 sha256
             import bcrypt
             pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
-            row = conn.execute("SELECT id,username,password,token FROM users WHERE username = ?", (username,)).fetchone()
+            row = conn.execute("SELECT id,username,password_hash,token FROM users WHERE username = ?", (username,)).fetchone()
             if row:
                 return JSONResponse({"detail": "账号已存在"}, status_code=400)
             token = make_token()
             cur = conn.execute(
-                "INSERT INTO users (username, email, password, token, created) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO users (username, email, password_hash, token, created_at) VALUES (?, ?, ?, ?, ?)",
                 (username, email, pw_hash, token, time.time()))
             conn.execute(
                 "INSERT OR IGNORE INTO user_balance (user_id, balance, total_charged, total_spent, updated) VALUES (?, 0, 0, 0, ?)",
