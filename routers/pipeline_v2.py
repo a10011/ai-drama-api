@@ -79,15 +79,17 @@ async def start(req: PipelineStartRequest, request: Request):
     existing_chars = []
     if req.episode > 1 and req.project_id:
         try:
-            rows = conn.execute(
+            conn2 = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+            rows = conn2.execute(
                 "SELECT characters FROM episodes WHERE project_id=? AND episode_num=?", 
                 (str(req.project_id), req.episode - 1)
             ).fetchall()
             if rows:
                 existing_chars = json.loads(rows[0][0] or "[]")
                 logger.info(f"[V2] 第{req.episode}集: 复用第{req.episode-1}集{len(existing_chars)}个角色")
-        except:
-            pass
+            conn2.close()
+        except Exception as e:
+            logger.warning(f"[V2] 续集角色复用失败: {e}")
     
     start_pipeline(pipeline_id, uid, {
         "title": req.title,
