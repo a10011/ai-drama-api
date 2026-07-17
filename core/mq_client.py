@@ -1,6 +1,6 @@
 """
 Redis MQ — Agent 通信总线 (Hermes 风格命名)
-带自动重连和持久化降级机制，Redis 挂了不丢任务
+健康检查 + 智能降级，Redis 不存在也不影响服务
 """
 import json
 import logging
@@ -46,66 +46,153 @@ COMPLETED_TOPIC = {
 _MQ_DIR = "/www/wwwroot/storage/mq_queue"
 os.makedirs(_MQ_DIR, exist_ok=True)
 
-# 内存降级队列（临时用）
-_in_memory_queues = {}
-_in_memory_lock = threading.Lock()
-
 
 class MQ:
     def __init__(self, host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB):
         self.params = dict(host=host, port=port, db=db, decode_responses=True)
         self._conn = None
         self._connected = False
-        self._reconnect_timer = None
-        self._connect()
+        self._connecting = False  # 防止并发重复连接
+        self._health_check_interval = 30  # 30秒检查一次，不用频繁 ping
+        self._health_timer = None
+        # 启动时检查一次，不阻塞
+        self._check_health(silent=True)
+        # 定时健康检查
+        self._schedule_health_check()
 
-    def _connect(self):
-        """尝试连接 Redis，失败不抛异常"""
+    def _check_health(self, silent=False):
+        """健康检查，非阻塞"""
+        if self._connecting:
+            return
+        self._connecting = True
         try:
             if redis is None:
-                logger.warning("[MQ] redis 模块未安装，使用持久化降级")
+                if not silent:
+                    logger.warning("[MQ] redis 模块未安装，使用持久化降级")
                 self._connected = False
                 return
-            if self._conn is None:
-                self._conn = redis.Redis(**self.params, socket_connect_timeout=5, socket_timeout=5)
+            # 如果已经连接且 ping 成功，不需要重连
+            if self._connected and self._conn:
+                try:
+                    self._conn.ping()
+                    return  # 仍然健康，什么都不做
+                except:
+                    pass  # 断了，下面重建
+            # 尝试连接/重连
+            self._conn = redis.Redis(**self.params, socket_connect_timeout=3, socket_timeout=3, retry_on_timeout=True)
             self._conn.ping()
             self._connected = True
-            logger.info("[MQ] Redis 连接成功")
+            if not silent:
+                logger.info("[MQ] Redis 连接成功")
         except Exception as e:
-            if not self._connected:
-                logger.warning(f"[MQ] Redis 连接失败: {e}，使用持久化降级")
             self._connected = False
-            # 5 秒后自动重连
-            self._schedule_reconnect()
+            self._conn = None
+            if not silent:
+                logger.warning(f"[MQ] Redis 不可用: {e}，使用持久化降级")
+        finally:
+            self._connecting = False
 
-    def _schedule_reconnect(self):
-        """定时重连 Redis"""
-        if self._reconnect_timer:
-            self._reconnect_timer.cancel()
-        self._reconnect_timer = threading.Timer(5, self._connect)
-        self._reconnect_timer.daemon = True
-        self._reconnect_timer.start()
+    def _schedule_health_check(self):
+        """定时健康检查"""
+        if self._health_timer:
+            self._health_timer.cancel()
+        self._health_timer = threading.Timer(self._health_check_interval, self._health_check)
+        self._health_timer.daemon = True
+        self._health_timer.start()
 
-    def _get_conn(self):
-        """获取连接，失败则触发重连"""
+    def _ensure_connected(self):
+        """确保连接可用，失败返回 False"""
         if not self._connected:
-            self._connect()
-        if not self._connected:
-            raise RedisUnavailable()
-        return self.r
+            self._check_health()
+        return self._connected
 
-    @property
-    def r(self):
-        if self._conn is None:
-            self._conn = redis.Redis(**self.params, socket_connect_timeout=5, socket_timeout=5)
-        return self._conn
+    def push(self, queue: str, data: dict):
+        """推送到队列，Redis 不可用时持久化到文件"""
+        if self._ensure_connected():
+            try:
+                self._conn.rpush(queue, json.dumps(data, ensure_ascii=False))
+                return
+            except Exception as e:
+                logger.warning(f"[MQ] push 失败: {e}，降级到文件")
+        self._persist_push(queue, data)
+
+    def pop(self, queue: str, timeout: int = 5) -> Optional[dict]:
+        """从队列弹出"""
+        # 1. 先试 Redis（非阻塞快速失败）
+        if self._ensure_connected():
+            try:
+                rv = self._conn.blpop(queue, timeout=min(timeout, 2))
+                if rv:
+                    _, raw = rv
+                    return json.loads(raw)
+            except Exception:
+                self._connected = False
+                self._conn = None
+
+        # 2. 试持久化文件队列
+        file_task = self._persist_pop(queue)
+        if file_task:
+            return file_task
+
+        # 3. 定期清理旧文件（每 10 次 pop 清一次）
+        if hasattr(self, '_pop_count'):
+            self._pop_count += 1
+        else:
+            self._pop_count = 1
+        if self._pop_count % 10 == 0:
+            self._purge_old_files()
+
+        return None
+
+    def publish(self, channel: str, data: dict):
+        """发布事件，Redis 不可用时持久化到文件"""
+        if self._ensure_connected():
+            try:
+                self._conn.publish(channel, json.dumps(data, ensure_ascii=False))
+                return
+            except Exception as e:
+                logger.warning(f"[MQ] publish 失败: {e}，降级到文件")
+        self._persist_push(f"topic_{channel}", data)
+
+    def subscribe(self, *channels):
+        """订阅频道（仅 Redis 可用时）"""
+        if not self._ensure_connected():
+            logger.warning("[MQ] Redis 不可用，无法订阅")
+            return None
+        try:
+            pubsub = self._conn.pubsub()
+            pubsub.subscribe(*channels)
+            return pubsub
+        except Exception as e:
+            logger.warning(f"[MQ] subscribe 失败: {e}")
+            return None
+
+    def get_message(self, pubsub, timeout: float = 1.0) -> Optional[dict]:
+        """从 pubsub 获取消息"""
+        if pubsub is None:
+            return None
+        try:
+            msg = pubsub.get_message(timeout=timeout)
+            if msg and msg.get('type') == 'message':
+                return json.loads(msg['data'])
+        except Exception as e:
+            logger.warning(f"[MQ] get_message 失败: {e}")
+        return None
+
+    def close(self):
+        if self._conn:
+            self._conn.close()
+        if self._health_timer:
+            self._health_timer.cancel()
+
+    # ── 持久化降级方法 ──
 
     def _persist_push(self, queue: str, data: dict):
         """持久化推送到文件"""
         try:
             qdir = os.path.join(_MQ_DIR, queue)
             os.makedirs(qdir, exist_ok=True)
-            fpath = os.path.join(qdir, f"{int(time.time()*1000)}_{threading.current_thread().ident}.json")
+            fpath = os.path.join(qdir, f"{int(time.time()*1000)}.json")
             with open(fpath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
             return True
@@ -129,103 +216,29 @@ class MQ:
                 os.remove(fpath)
                 return data
             except Exception:
-                os.remove(fpath)
+                if os.path.exists(fpath):
+                    os.remove(fpath)
                 return None
         except Exception as e:
             logger.error(f"[MQ] 持久化读取失败: {e}")
             return None
 
-    def _purge_old_files(self, queue: str, max_age_hours=24):
-        """清理超过指定时间的降级文件，防止磁盘占满"""
+    def _purge_old_files(self, max_age_hours=24):
+        """清理超过指定时间的降级文件"""
         try:
-            qdir = os.path.join(_MQ_DIR, queue)
-            if not os.path.exists(qdir):
+            if not os.path.exists(_MQ_DIR):
                 return
             now = time.time()
-            for fname in os.listdir(qdir):
-                fpath = os.path.join(qdir, fname)
-                if now - os.path.getmtime(fpath) > max_age_hours * 3600:
-                    os.remove(fpath)
-                    logger.info(f"[MQ] 清理过期降级文件: {fname}")
+            for qname in os.listdir(_MQ_DIR):
+                qdir = os.path.join(_MQ_DIR, qname)
+                if not os.path.isdir(qdir):
+                    continue
+                for fname in os.listdir(qdir):
+                    fpath = os.path.join(qdir, fname)
+                    if now - os.path.getmtime(fpath) > max_age_hours * 3600:
+                        os.remove(fpath)
         except Exception as e:
             logger.warning(f"[MQ] 清理过期文件失败: {e}")
-
-    def push(self, queue: str, data: dict):
-        """推送到队列，Redis 挂了持久化到文件"""
-        try:
-            self._get_conn()
-            self.r.rpush(queue, json.dumps(data, ensure_ascii=False))
-        except (RedisUnavailable, Exception) as e:
-            logger.warning(f"[MQ] push 失败，持久化到文件: {e}")
-            self._persist_push(queue, data)
-
-    def pop(self, queue: str, timeout: int = 5) -> Optional[dict]:
-        """从队列弹出，优先 Redis，其次持久化文件，最后内存"""
-        # 1. 先试 Redis
-        try:
-            self._get_conn()
-            rv = self.r.blpop(queue, timeout=timeout)
-            if rv:
-                _, raw = rv
-                return json.loads(raw)
-        except (RedisUnavailable, Exception):
-            pass
-
-        # 2. 再试持久化文件队列
-        file_task = self._persist_pop(queue)
-        if file_task:
-            return file_task
-
-        # 3. 最后试内存队列（临时降级）
-        with _in_memory_lock:
-            if queue in _in_memory_queues and _in_memory_queues[queue]:
-                raw = _in_memory_queues[queue].pop(0)
-                if not _in_memory_queues[queue]:
-                    del _in_memory_queues[queue]
-                try:
-                    return json.loads(raw)
-                except:
-                    pass
-
-        # 4. 定期清理旧文件
-        self._purge_old_files(queue)
-        
-        return None
-
-    def publish(self, channel: str, data: dict):
-        """发布事件，Redis 挂了持久化到文件"""
-        try:
-            self._get_conn()
-            self.r.publish(channel, json.dumps(data, ensure_ascii=False))
-        except (RedisUnavailable, Exception) as e:
-            logger.warning(f"[MQ] publish 失败，持久化到文件: {e}")
-            self._persist_push(f"topic_{channel}", data)
-
-    def subscribe(self, *channels):
-        self._pubsub = self.r.pubsub()
-        self._pubsub.subscribe(*channels)
-
-    def get_message(self, timeout: float = 1.0) -> Optional[dict]:
-        if not hasattr(self, '_pubsub') or self._pubsub is None:
-            return None
-        try:
-            msg = self._pubsub.get_message(timeout=timeout)
-            if msg and msg['type'] == 'message':
-                return json.loads(msg['data'])
-        except:
-            pass
-        return None
-
-    def close(self):
-        if hasattr(self, '_pubsub') and self._pubsub:
-            self._pubsub.close()
-        if self._conn:
-            self._conn.close()
-
-
-class RedisUnavailable(Exception):
-    """Redis 不可用"""
-    pass
 
 
 mq = MQ()
