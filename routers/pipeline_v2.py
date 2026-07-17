@@ -66,8 +66,8 @@ async def start(req: PipelineStartRequest, request: Request):
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         cur = conn.execute(
-            "INSERT INTO projects (title, genre, status, pipeline_id, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
-            (req.title, req.genre, "processing", pipeline_id, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
+            "INSERT INTO projects (title, genre, status, progress, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
+            (req.title, req.genre, "processing", 0, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
         )
         db_proj_id = cur.lastrowid
         conn.commit()
