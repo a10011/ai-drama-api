@@ -310,11 +310,22 @@ class AgentV3(ABC):
             "pipeline_id": result.get("pipeline_id", ""), "stage": self.name,
             "result": result, "success": result.get("success", False),
         })
-        # 自动注册 asset：把 agent 产出数据存入 pipeline_assets 表
+        # 自动注册 asset
         try:
             pid = result.get("pipeline_id", "")
             if pid:
                 meta_keys = {"success", "error", "pipeline_id", "user_id", "data"}
+                # 按阶段注册对应 asset
+                asset_type_map = {
+                    "script": "script",
+                    "director": "director_analysis",
+                    "character": "characters",
+                    "storyboard": "storyboard",
+                    "scene": "scene_images",
+                    "video": "video_clips",
+                    "composite": "composite",
+                }
+                asset_type = asset_type_map.get(self.name, self.name)
                 business_data = {k: v for k, v in result.items() if k not in meta_keys}
                 if business_data:
                     import json
@@ -322,13 +333,13 @@ class AgentV3(ABC):
                     if len(json_str) > 50000:
                         import os, hashlib
                         os.makedirs('/www/wwwroot/storage/assets', exist_ok=True)
-                        fname = f'{self.name}_{pid[:12]}_{hashlib.md5(json_str.encode()).hexdigest()[:8]}.json'
+                        fname = f'{asset_type}_{pid[:12]}_{hashlib.md5(json_str.encode()).hexdigest()[:8]}.json'
                         fpath = f'/www/wwwroot/storage/assets/{fname}'
                         with open(fpath, 'w', encoding='utf-8') as f:
                             f.write(json_str)
-                        self.register_asset(self.name, file_path=fpath, meta={"pipeline_id": pid, "size": len(json_str)})
+                        self.register_asset(asset_type, file_path=fpath, meta={"pipeline_id": pid, "size": len(json_str)})
                     else:
-                        self.register_asset(self.name, url=json_str, meta={"pipeline_id": pid, "size": len(json_str)})
+                        self.register_asset(asset_type, url=json_str, meta={"pipeline_id": pid, "size": len(json_str)})
         except Exception as e:
             logger.warning(f"[Worker:{self.name}] asset register failed: {e}")
         # push next stage
