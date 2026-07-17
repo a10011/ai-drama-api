@@ -43,14 +43,26 @@ logger = logging.getLogger(__name__)
 # ── 请求追踪模块 — 记录每次模型调用，超时主动查询 ──
 import sqlite3 as _sqlite3
 import uuid as _uuid
+import queue as _queue
 
 _REQUEST_TRACKING_DB = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
 _active_requests = {}
 _tracking_lock = threading.Lock()
+_request_buffer = _queue.Queue(maxsize=1000)  # 批量写入缓冲
+_tracking_conn = None
+
+def _get_tracking_conn():
+    """进程内共享连接，避免频繁 connect/close"""
+    global _tracking_conn
+    if _tracking_conn is None:
+        _tracking_conn = _sqlite3.connect(_REQUEST_TRACKING_DB, timeout=10)
+        _tracking_conn.execute("PRAGMA journal_mode=WAL")
+        _tracking_conn.execute("PRAGMA synchronous=NORMAL")
+    return _tracking_conn
 
 def _init_request_tracking():
     try:
-        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        conn = _get_tracking_conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS model_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +82,6 @@ def _init_request_tracking():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_req_status ON model_requests(status, sent_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_req_pipeline ON model_requests(pipeline_id)")
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.error(f"[RequestTrack] 初始化失败: {e}")
 
@@ -89,13 +100,12 @@ def track_request_start(model_name: str, content_type: str = "llm", pipeline_id:
             "status": "pending",
         }
     try:
-        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        conn = _get_tracking_conn()
         conn.execute(
-            "INSERT INTO model_requests (request_id, model_name, content_type, pipeline_id, order_id, provider_task_id, status, sent_at) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO model_requests (request_id, model_name, content_type, pipeline_id, order_id, provider_task_id, status, sent_at) VALUES (?,?,?,?,?,?,?,?)",
             (request_id, model_name, content_type, pipeline_id, order_id, provider_task_id, "pending", time.time())
         )
         conn.commit()
-        conn.close()
     except:
         pass
     logger.info(f"[RequestTrack] 📤 请求发出: {request_id} model={model_name} type={content_type}")
@@ -108,13 +118,12 @@ def track_request_complete(request_id: str, status: str = "completed", result_ur
             _active_requests[request_id]["status"] = status
             _active_requests[request_id]["responded_at"] = time.time()
     try:
-        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        conn = _get_tracking_conn()
         conn.execute(
             "UPDATE model_requests SET status=?, responded_at=?, result_url=?, error_msg=? WHERE request_id=?",
             (status, time.time(), result_url, error_msg, request_id)
         )
         conn.commit()
-        conn.close()
     except:
         pass
     logger.info(f"[RequestTrack] ✅ 请求完成: {request_id} status={status}")
