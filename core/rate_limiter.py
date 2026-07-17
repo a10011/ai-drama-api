@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-两层速率限制（一次性版本）：
+两层速率限制 + 背压控制：
 1. 用户Key→模型：每个 (user_id, model) 最多 3 并发，第 4 个排队
 2. 模型级 RPM：令牌桶控制
+3. 背压：模型返回前不塞新请求
 """
 import threading
 import time
@@ -12,6 +13,35 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 MAX_CONCURRENT_PER_KEY_MODEL = 3  # 每个 Key 对每个模型最多 3 并发
+
+
+class BackpressureManager:
+    """背压管理器：跟踪每个 (user_id, model) 的活跃请求"""
+    
+    def __init__(self):
+        self._active = defaultdict(int)  # key -> 当前活跃请求数
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+    
+    def wait_for_slot(self, key: str, timeout: float = 600):
+        """等待活跃请求降为 0 后再继续"""
+        with self._condition:
+            deadline = time.time() + timeout
+            while self._active[key] >= MAX_CONCURRENT_PER_KEY_MODEL:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    logger.warning(f"[Backpressure] {key} 等待超时")
+                    return False
+                self._condition.wait(timeout=min(remaining, 1.0))
+            self._active[key] += 1
+            return True
+    
+    def release(self, key: str):
+        """请求完成，释放槽位"""
+        with self._condition:
+            if self._active[key] > 0:
+                self._active[key] -= 1
+            self._condition.notify_all()
 
 
 class PerModelConcurrencyLimiter:
@@ -108,31 +138,43 @@ class ModelRpmLimiter:
 
 
 class RateLimiter:
-    """统一速率限制器"""
+    """统一速率限制器 + 背压"""
     
     def __init__(self):
         self.model_concurrency = PerModelConcurrencyLimiter()
         self.model_rpm = ModelRpmLimiter()
+        self.backpressure = BackpressureManager()
     
     def execute(self, user_id: int, model: str, rpm: float, func, *args, **kwargs):
         """
         带限流的执行：
-        1. 拿 (user_id, model) 并发槽（最多等 10 分钟）
-        2. RPM 令牌桶
-        3. 执行函数
+        1. 背压：等模型返回前不塞新请求
+        2. 拿 (user_id, model) 并发槽（最多等 10 分钟）
+        3. RPM 令牌桶
+        4. 执行函数
         """
-        # 1. 并发限制
-        if not self.model_concurrency.acquire(user_id, model, timeout=600):
-            raise TimeoutError(f"({user_id},{model}) 并发槽等待超时")
+        key = f"{user_id}:{model}"
+        
+        # 1. 背压控制：等当前活跃请求降到上限以下
+        if not self.backpressure.wait_for_slot(key, timeout=600):
+            raise TimeoutError(f"({user_id},{model}) 背压等待超时")
         
         try:
-            # 2. RPM 限流
-            self.model_rpm.wait_and_consume(user_id, model, rpm)
+            # 2. 并发限制
+            if not self.model_concurrency.acquire(user_id, model, timeout=600):
+                raise TimeoutError(f"({user_id},{model}) 并发槽等待超时")
             
-            # 3. 执行
-            return func(*args, **kwargs)
+            try:
+                # 3. RPM 限流
+                self.model_rpm.wait_and_consume(user_id, model, rpm)
+                
+                # 4. 执行
+                return func(*args, **kwargs)
+            finally:
+                self.model_concurrency.release(user_id, model)
         finally:
-            self.model_concurrency.release(user_id, model)
+            # 5. 释放背压槽位，让下一个请求进来
+            self.backpressure.release(key)
 
 
 # 全局单例
