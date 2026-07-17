@@ -999,6 +999,7 @@ def call_llm(
     model: str = None,
     timeout: int = 60,
     max_tokens: int = 4096,
+    temperature: float = None,
     user_id: int = 0,
     drama_id: str = "",
     pipeline_id: str = "",
@@ -1051,7 +1052,10 @@ def call_llm(
             {"role": "user", "content": prompt}
         ]
         
-        resp = provider.chat(msgs, max_tokens=max_tokens, timeout=timeout)
+        kwargs = {"max_tokens": max_tokens, "timeout": timeout}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        resp = provider.chat(msgs, **kwargs)
         text = resp if isinstance(resp, str) else resp.get("content", resp.get("text", str(resp)))
         
         track_request_complete(request_id, "completed", result_url=text[:100])
@@ -1379,9 +1383,10 @@ class UnifiedModel:
         system: str = "",
         model: str = None,
         timeout: int = 60,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        temperature: float = None
     ) -> ModelResult:
-        return call_llm(prompt, system, model, timeout, max_tokens, user_id=0, drama_id="")
+        return call_llm(prompt, system, model, timeout, max_tokens, temperature=temperature, user_id=0, drama_id="")
     
     @staticmethod
     def character_portraits(
