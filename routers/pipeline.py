@@ -1024,6 +1024,7 @@ async def step_pipeline(project_id: str, body: StepRequest, request: Request):
             self.user_id = 0
             self.episode = 1
             self.project_id = ""
+            self.characters = []
     
     v2req = V2Req()
     try:
