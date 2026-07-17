@@ -61,13 +61,13 @@ async def start(req: PipelineStartRequest, request: Request):
     except Exception as e:
         logger.warning(f"[V2] pipeline DB 失败: {e}")
 
-    # 写入 projects（用原始 auto-increment id + project_code）
+    # 写入 projects（用原始 auto-increment id）
     try:
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         cur = conn.execute(
-            "INSERT INTO projects (title, genre, status, project_code, pipeline_id, user_id, created, updated) VALUES (?,?,?,?,?,?,?,?)",
-            (req.title, req.genre, "processing", project_id, pipeline_id, uid, time.time(), time.time()),
+            "INSERT INTO projects (title, genre, status, pipeline_id, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
+            (req.title, req.genre, "processing", pipeline_id, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
         )
         db_proj_id = cur.lastrowid
         conn.commit()
@@ -169,13 +169,13 @@ def start_all_workers(counts: dict = None):
 
 @router.get("/project/{project_code}")
 async def v2_project_detail(project_code: str):
-    """V2 项目详情（按 project_code 查，含全部资产）"""
+    """V2 项目详情（按 project_id 查，含全部资产）"""
     try:
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT id, project_code, pipeline_id, title, genre, status, video_url, progress, created, updated FROM projects WHERE project_code=?",
+            "SELECT id, pipeline_id, title, genre, status, progress, created, updated FROM projects WHERE id=?",
             (project_code,)
         ).fetchone()
         if not row:
@@ -198,12 +198,12 @@ async def v2_download(project_code: str):
         import sqlite3
         conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
         row = conn.execute(
-            "SELECT project_code, video_url, title FROM projects WHERE project_code=? AND video_url IS NOT NULL AND video_url!=''",
+            "SELECT id, title FROM projects WHERE id=? AND pipeline_id IS NOT NULL",
             (project_code,)
         ).fetchone()
         conn.close()
         if not row:
             return {"success": False, "error": "尚未完成或没有视频"}
-        return {"success": True, "project_code": row[0], "title": row[2], "video_url": row[1]}
+        return {"success": True, "project_code": row[0], "title": row[1], "video_url": ""}
     except Exception as e:
         return {"success": False, "error": str(e)}
