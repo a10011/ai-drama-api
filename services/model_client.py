@@ -39,6 +39,116 @@ from services.usage_tracker import log_usage
 
 logger = logging.getLogger(__name__)
 
+# ── 请求追踪模块 — 记录每次模型调用，超时主动查询 ──
+import sqlite3 as _sqlite3
+import uuid as _uuid
+
+_REQUEST_TRACKING_DB = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
+_active_requests = {}
+_tracking_lock = threading.Lock()
+
+def _init_request_tracking():
+    try:
+        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS model_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT UNIQUE NOT NULL,
+                model_name TEXT NOT NULL DEFAULT '',
+                content_type TEXT NOT NULL DEFAULT 'llm',
+                pipeline_id TEXT NOT NULL DEFAULT '',
+                order_id TEXT NOT NULL DEFAULT '',
+                provider_task_id TEXT NOT NULL DEFAULT '',
+                status TEXT DEFAULT 'pending',
+                sent_at REAL DEFAULT 0,
+                responded_at REAL DEFAULT 0,
+                error_msg TEXT NOT NULL DEFAULT '',
+                result_url TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_req_status ON model_requests(status, sent_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_req_pipeline ON model_requests(pipeline_id)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[RequestTrack] 初始化失败: {e}")
+
+_init_request_tracking()
+
+def track_request_start(model_name: str, content_type: str = "llm", pipeline_id: str = "",
+                        order_id: str = "", provider_task_id: str = "", timeout: int = 60) -> str:
+    """记录请求发出"""
+    request_id = str(_uuid.uuid4())[:12]
+    with _tracking_lock:
+        _active_requests[request_id] = {
+            "model": model_name,
+            "provider_task_id": provider_task_id,
+            "sent_at": time.time(),
+            "timeout": timeout,
+            "status": "pending",
+        }
+    try:
+        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        conn.execute(
+            "INSERT INTO model_requests (request_id, model_name, content_type, pipeline_id, order_id, provider_task_id, status, sent_at) VALUES (?,?,?,?,?,?,?,?)",
+            (request_id, model_name, content_type, pipeline_id, order_id, provider_task_id, "pending", time.time())
+        )
+        conn.commit()
+        conn.close()
+    except:
+        pass
+    logger.info(f"[RequestTrack] 📤 请求发出: {request_id} model={model_name} type={content_type}")
+    return request_id
+
+def track_request_complete(request_id: str, status: str = "completed", result_url: str = "", error_msg: str = ""):
+    """记录请求完成"""
+    with _tracking_lock:
+        if request_id in _active_requests:
+            _active_requests[request_id]["status"] = status
+            _active_requests[request_id]["responded_at"] = time.time()
+    try:
+        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        conn.execute(
+            "UPDATE model_requests SET status=?, responded_at=?, result_url=?, error_msg=? WHERE request_id=?",
+            (status, time.time(), result_url, error_msg, request_id)
+        )
+        conn.commit()
+        conn.close()
+    except:
+        pass
+    logger.info(f"[RequestTrack] ✅ 请求完成: {request_id} status={status}")
+
+def track_request_fail(request_id: str, error_msg: str):
+    """记录请求失败"""
+    track_request_complete(request_id, status="failed", error_msg=error_msg)
+
+def check_stale_requests(max_wait_seconds: int = 300) -> list:
+    """检查超时的挂起请求"""
+    stale = []
+    try:
+        conn = _sqlite3.connect(_REQUEST_TRACKING_DB)
+        rows = conn.execute(
+            "SELECT request_id, model_name, content_type, pipeline_id, order_id, provider_task_id, sent_at FROM model_requests WHERE status='pending' AND sent_at < ?",
+            (time.time() - max_wait_seconds,)
+        ).fetchall()
+        conn.close()
+        for row in rows:
+            stale.append({
+                "request_id": row[0],
+                "model_name": row[1],
+                "content_type": row[2],
+                "pipeline_id": row[3],
+                "order_id": row[4],
+                "provider_task_id": row[5],
+                "wait_seconds": int(time.time() - row[6]),
+            })
+            logger.warning(f"[RequestTrack] ⏰ 超时请求: {row[0]} 已等待 {int(time.time()-row[6])}s model={row[1]}")
+    except Exception as e:
+        logger.error(f"[RequestTrack] 检查超时失败: {e}")
+    return stale
+
+# ── 请求追踪模块结束 ──
+
 # ── 结构化数据类型 ──────────────────────────────────────────
 
 class ModelResult(TypedDict, total=False):
@@ -640,10 +750,13 @@ def generate_image(
     final_size = _normalize_size(size or cfg.get("size", "1024x1024"), model_name)
     final_timeout = timeout or cfg["timeout"]
 
+    request_id = track_request_start(model_name, "image", pipeline_id, order_id, timeout=final_timeout)
+
     try:
         # 获取模型槽位 — 限流时等久点
         slot_timeout = max(final_timeout + 30, 300)  # 至少300秒等槽位
         if not _acquire_model_slot(model_name, timeout=slot_timeout):
+            track_request_fail(request_id, "槽位获取失败(并发已满)")
             raise RuntimeError(f"{model_name} 槽位获取失败(并发已满)")
 
         try:
@@ -653,18 +766,21 @@ def generate_image(
             _release_model_slot(model_name)
 
         if urls and len(urls) > 0:
+            track_request_complete(request_id, "completed", result_url=urls[0])
             logger.info(f"[ModelClient] ✅ {model_name} 成功 (order={order_id})")
             return ModelResult(success=True, url=urls[0], model=model_name, error="", order_id=order_id)
 
         # 返回空 → 检查是否有累积错误信息
         last_err = retry_state.last_error if retry_state else ""
         err_msg = last_err if last_err else f"{model_name} 图片生成返回空"
+        track_request_fail(request_id, err_msg)
         logger.error(f"[ModelClient] {model_name} 返回空 → 不重试，立即失败 (order={order_id}), last_error={last_err[:100]}")
         return ModelResult(success=False, error=err_msg, url="", model=model_name, order_id=order_id)
 
     except Exception as e:
         _release_model_slot(model_name)
         error_str = str(e)
+        track_request_fail(request_id, error_str)
         logger.error(f"[ModelClient] ❌ {model_name} 图片失败 → 不重试: {error_str[:120]}")
         # 返回包含原始错误信息的结果
         return ModelResult(success=False, error=error_str[:200], url="", model=model_name, order_id=order_id)
@@ -684,7 +800,7 @@ def generate_video(
     drama_id: str = "",
     **kwargs
 ) -> ModelResult:
-    """视频生成。同模型重试，不降级切换，返回结构化结果"""
+    """视频生成。同模型重试，不降级切换，返回结构化结果 + 请求追踪"""
     chain = _smart_chain("video")
 
     last_error = ""
@@ -702,6 +818,8 @@ def generate_video(
     # [bugfix] 此前主逻辑被错误缩进进上面的 if 块内，导致正常模型时视频生成被完全跳过
     final_timeout = timeout or cfg["timeout"]
 
+    request_id = track_request_start(model_name, "video", pipeline_id, order_id, timeout=final_timeout)
+
     try:
         retry_state = RetryState(model_name=model_name)
         urls = _generate_video_with_model(
@@ -710,6 +828,7 @@ def generate_video(
         )
 
         if urls and len(urls) > 0:
+            track_request_complete(request_id, "completed", result_url=urls[0])
             logger.info(
                 f"[ModelClient] ✅ {model_name} 视频成功 "
                 f"url={urls[0][:80]}"
@@ -727,11 +846,13 @@ def generate_video(
             return _mr
 
         # 返回空 → 不重试，直接抛异常让人工定位
+        track_request_fail(request_id, "视频生成返回空")
         logger.error(f"[ModelClient] ❌ {model_name} 视频返回空 → 不重试")
         raise RuntimeError(f"[{model_name}] 视频生成返回空 | 建议: 检查API额度/网络/参数/prompt")
 
     except Exception as e:
         error_str = str(e)[:150]
+        track_request_fail(request_id, error_str)
         logger.error(f"[ModelClient] ❌ {model_name} 视频失败 → 不重试: {error_str}")
         raise RuntimeError(f"[{model_name}] 视频生成失败: {error_str} | 建议: 检查API额度/网络/参数")
     
@@ -869,9 +990,13 @@ def call_llm(
     timeout: int = 60,
     max_tokens: int = 4096,
     user_id: int = 0,
-    drama_id: str = ""
+    drama_id: str = "",
+    pipeline_id: str = "",
+    order_id: str = ""
 ) -> ModelResult:
-    """LLM 调用统一入口 - 走生态链路由"""
+    """LLM 调用统一入口 - 走生态链路由 + 请求追踪"""
+    request_id = track_request_start(model or "unknown", "llm", pipeline_id, order_id, timeout=timeout)
+    
     if model is None:
         chain = _smart_chain("llm")
         model = chain[0] if chain else "deepseek-chat"
@@ -919,6 +1044,7 @@ def call_llm(
         resp = provider.chat(msgs, max_tokens=max_tokens, timeout=timeout)
         text = resp if isinstance(resp, str) else resp.get("content", resp.get("text", str(resp)))
         
+        track_request_complete(request_id, "completed", result_url=text[:100])
         logger.info(f"[ModelClient] ✅ LLM成功: model={model}, response_len={len(text)}")
         log_usage(model_name=model, model_type="llm", total_tokens=len(text)//4,
                   user_id=user_id, drama_id=drama_id)
@@ -931,6 +1057,7 @@ def call_llm(
         
     except Exception as e:
         error_str = str(e)[:200]
+        track_request_fail(request_id, error_str)
         logger.error(f"[ModelClient] ❌ LLM失败: model={model}, error={error_str}")
         return ModelResult(
             success=False,
@@ -1270,3 +1397,62 @@ class UnifiedModel:
         project_id: str = ""
     ) -> str:
         return download_to_storage(url, name_hint, user_id, order_id, pipeline_id=pipeline_id, project_id=project_id)
+
+
+# ── 后台请求监控线程 ──
+def _stale_request_monitor():
+    """每 60 秒检查一次超时请求"""
+    while True:
+        time.sleep(60)
+        try:
+            stale = check_stale_requests(max_wait_seconds=300)  # 5 分钟以上算超时
+            for req in stale:
+                logger.warning(
+                    f"[RequestMonitor] ⚠️ 主动查询: {req['request_id']} "
+                    f"model={req['model_name']} wait={req['wait_seconds']}s "
+                    f"task_id={req['provider_task_id']}"
+                )
+                # 根据模型类型查询状态
+                _query_stale_request(req)
+        except Exception as e:
+            logger.error(f"[RequestMonitor] 监控异常: {e}")
+
+def _query_stale_request(req: dict):
+    """根据 provider_task_id 查询模型状态"""
+    provider_task_id = req.get("provider_task_id", "")
+    model_name = req.get("model_name", "")
+    request_id = req.get("request_id", "")
+    
+    if not provider_task_id:
+        # 没有 task_id，只能记录警告
+        track_request_fail(request_id, f"超时且无 provider_task_id，无法查询状态")
+        return
+    
+    try:
+        # 尝试查询各个 provider 的状态
+        if model_name in ("seedance", "seedance-1-5-pro"):
+            from services.ai_providers import SeedanceProvider
+            sp = SeedanceProvider()
+            status = sp.check_task_status(provider_task_id)
+            if status:
+                if status.get("status") == "succeed":
+                    track_request_complete(request_id, "completed", result_url=status.get("video_url", ""))
+                    logger.info(f"[RequestMonitor] ✅ 超时请求恢复: {request_id} status=succeed")
+                elif status.get("status") == "fail":
+                    track_request_fail(request_id, f"模型侧返回失败: {status.get('error', 'unknown')}")
+                    logger.warning(f"[RequestMonitor] ❌ 超时请求确认失败: {request_id}")
+                else:
+                    logger.info(f"[RequestMonitor] 🔄 仍在处理中: {request_id} status={status.get('status')}")
+        elif model_name == "happyhorse":
+            from services.ai_providers import happyhorse
+            status = happyhorse.check_task_status(provider_task_id)
+            if status:
+                if status.get("success"):
+                    track_request_complete(request_id, "completed", result_url=status.get("video_url", ""))
+                else:
+                    track_request_fail(request_id, f"模型侧失败: {status.get('error', 'unknown')}")
+    except Exception as e:
+        logger.error(f"[RequestMonitor] 查询状态失败: {e}")
+
+_monitor_thread = threading.Thread(target=_stale_request_monitor, daemon=True, name="request-monitor")
+_monitor_thread.start()
