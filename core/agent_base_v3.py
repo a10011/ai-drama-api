@@ -396,7 +396,7 @@ def start_worker(agent_cls):
         logger.info(f"[Worker:{name}] 启动，监听 {queue}")
         while True:
             try:
-                task = mq.pop(queue, timeout=5)
+                task = mq.pop(queue, timeout=10)
                 if task is None:
                     continue
                 user_id = task.get("user_id", 0)
@@ -404,7 +404,7 @@ def start_worker(agent_cls):
                 agent.run(task, timeout=600)
             except Exception as e:
                 logger.error(f"[Worker:{name}] 异常: {e}", exc_info=True)
-                time.sleep(3)
+                time.sleep(5)
 
     t = threading.Thread(target=_loop, daemon=True, name=f"w-{name}")
     t.start()
