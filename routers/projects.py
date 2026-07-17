@@ -80,7 +80,7 @@ async def create_project(request: Request, data: dict = {}):
 
     now = time.time()
     pid = execute(
-        "INSERT INTO projects (title,script,genre,characters,pipeline_steps,status,created_at,updated,user_id) VALUES (?,?,?,?,?,'active',?,?,?)",
+        "INSERT INTO projects (title,script,genre,characters,pipeline_steps,status,created,updated,user_id) VALUES (?,?,?,?,?,'active',?,?,?)",
         (title, script, genre, characters, steps, now, now, user_id)
     )
     # 自动生成订单ID，写入预估成本
