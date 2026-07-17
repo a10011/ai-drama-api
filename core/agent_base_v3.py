@@ -396,8 +396,9 @@ def start_worker(agent_cls):
         logger.info(f"[Worker:{name}] 启动，监听 {queue}")
         while True:
             try:
-                task = mq.pop(queue, timeout=10)
+                task = mq.pop(queue, timeout=0)
                 if task is None:
+                    time.sleep(2)
                     continue
                 user_id = task.get("user_id", 0)
                 agent = agent_cls(user_id)
