@@ -1023,6 +1023,7 @@ async def step_pipeline(project_id: str, body: StepRequest, request: Request):
             self.script_text = ""
             self.user_id = 0
             self.episode = 1
+            self.project_id = ""
     
     v2req = V2Req()
     try:
@@ -1049,6 +1050,8 @@ async def step_pipeline(project_id: str, body: StepRequest, request: Request):
     # 传递角色数据
     if "characters" in params:
         v2req.characters = params["characters"]
+    # 关键：复用已有 project_id，不让 V2 创建新项目
+    v2req.project_id = project_id
     
     logger.info(f"[V2] step '{body.stage}' → 启动完整V2管道 project={project_id}, chars={len(v2req.characters)}")
     result = await v2_start(v2req, request)
