@@ -1,3 +1,4 @@
+import os
 import time, logging
 from .mq_client import mq, AGENT_QUEUES
 logger = logging.getLogger(__name__)
@@ -7,16 +8,19 @@ STAGE_ORDER = ["script", "director", "character", "storyboard", "scene", "video"
 STAGE_DAG = {}
 
 def _set_status(pipeline_id, status, video_url=""):
+    conn = None
     try:
         import sqlite3
-        conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+        conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
         conn.execute("UPDATE pipelines SET status=?, updated=? WHERE id=?", (status, time.time(), pipeline_id))
         if video_url:
             conn.execute("UPDATE projects SET video_url=?, status='completed' WHERE pipeline_id=?", (video_url, pipeline_id))
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.warning(f"set_status failed: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def start_pipeline(pipeline_id, user_id, init_data=None):
     _set_status(pipeline_id, "running:script")

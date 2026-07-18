@@ -45,7 +45,7 @@ import sqlite3 as _sqlite3
 import uuid as _uuid
 import queue as _queue
 
-_REQUEST_TRACKING_DB = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
+_REQUEST_TRACKING_DB = os.environ.get("TRACKING_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db"))
 _active_requests = {}
 _tracking_lock = threading.Lock()
 _request_buffer = _queue.Queue(maxsize=1000)  # 批量写入缓冲

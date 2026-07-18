@@ -20,7 +20,7 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL), format=log_fmt, datefmt=l
 logger = logging.getLogger("api")
 from app_config import BASE_URL
 
-app = FastAPI(title="AI短剧 API", version="4.0.0")
+app = FastAPI(title="AI短剧 API", version="4.0.0", docs_url="/docs", redoc_url="/redoc")
 
 
 @app.exception_handler(json.JSONDecodeError)
@@ -46,15 +46,24 @@ from fastapi import Request
 
 @app.middleware("http")
 async def inject_user_id(request: Request, call_next):
+    # Skip auth for login/captcha/health endpoints
+    if request.url.path in ("/api/login", "/api/captcha", "/health"):
+        response = await call_next(request)
+        return response
     request.state.user_id = 0
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         if token:
             from app_db import fetchone
-            row = fetchone("SELECT id FROM users WHERE token=?", (token,))
+            row = fetchone("SELECT id, expires_at FROM users WHERE token=?", (token,))
             if row:
-                request.state.user_id = row["id"]
+                # [P2] Check token expiry (30 days = 2592000s)
+                expires = row.get("expires_at")
+                if expires is None or expires > time.time():
+                    request.state.user_id = row["id"]
+                else:
+                    request.state.user_id = 0  # token expired
     response = await call_next(request)
     return response
 
@@ -385,7 +394,7 @@ async def _compat_login(request: _Request):
 
     row = fetchone("SELECT * FROM users WHERE username = ?", (username,))
     if row:
-        stored_pw = row["password"]
+        stored_pw = row["password_hash"]
         if not _verify_password(password, stored_pw):
             return _JSONResponse({"detail": "密码错误"}, status_code=400)
 
@@ -395,11 +404,11 @@ async def _compat_login(request: _Request):
     else:
         # 登录即注册：自动创建账号
         import hashlib, os as _os
-        pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=4)).decode()
+        pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
         token = "tok_" + hashlib.sha256(_os.urandom(32)).hexdigest()[:40]
         execute(
-            "INSERT INTO users (username, password, token, created) VALUES (?, ?, ?, ?)",
-            (username, pw_hash, token, time.time()))
+            "INSERT INTO users (username, password_hash, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (username, pw_hash, token, time.time(), time.time() + 2592000))
         execute(
             "INSERT OR IGNORE INTO user_balance (user_id, balance, total_charged, total_spent, updated) VALUES ((SELECT id FROM users WHERE username=?), 0, 0, 0, ?)",
             (username, time.time()))

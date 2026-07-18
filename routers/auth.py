@@ -37,8 +37,30 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
+# [P0 修复] 统一使用 bcrypt (rounds=12)，废弃 SHA256 密码哈希
+import bcrypt as _bcrypt
+
 def hash_password(password: str) -> str:
-    return hashlib.sha256(("salted_" + password).encode()).hexdigest()
+    """使用 bcrypt 哈希密码 (rounds=12)"""
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt(rounds=12)).decode()
+
+def verify_password(plain: str, stored: str) -> bool:
+    """验证密码：兼容 bcrypt ($2b$/$2y$/$2a$) 和旧 SHA256 格式"""
+    if not stored:
+        return False
+    # bcrypt 格式
+    if stored.startswith("$2"):
+        try:
+            return _bcrypt.checkpw(plain.encode(), stored.encode())
+        except (ValueError, TypeError):
+            return False
+    # 旧格式：SHA256 hex (64 chars) 或 MD5 hex (32 chars)
+    if len(stored) == 64:
+        return hashlib.sha256(plain.encode()).hexdigest() == stored
+    if len(stored) == 32:
+        return hashlib.md5(plain.encode()).hexdigest() == stored
+    # 兜底：明文比较（不应存在）
+    return plain == stored
 
 def make_token() -> str:
     return "tok_" + secrets.token_hex(24)
@@ -76,8 +98,6 @@ async def send_verification_code(request: Request):
     _send_code_phone_ts[phone] = now
 
     # [安全修复] 不再把验证码返回给客户端
-    # 此前直接返回 code，任何人可用任意手机号获取验证码冒充登录
-    # 验证码应只通过真实短信通道下发；如未接短信通道，仅记录日志
     logging.getLogger("api.auth").warning("[send-code] 短信通道未配置，验证码未下发 phone=%s", phone[:3] + "****" + phone[-4:])
     return {"success": True, "data": {"message": "验证码已发送，请注意查收"}}
 
@@ -107,23 +127,22 @@ async def login_or_register(request: Request):
     del _code_store[phone]
     
     from app_db import fetchone, execute
-    import hashlib, os as _os
     
     row = fetchone("SELECT id,username,password_hash,token FROM users WHERE username = ?", (phone,))
     if row:
         # 手机号已存在 -> 登录
-        token = row["token"] if row["token"] else "tok_" + hashlib.sha256(_os.urandom(32)).hexdigest()[:40]
+        token = row["token"] if row["token"] else "tok_" + hashlib.sha256(os.urandom(32)).hexdigest()[:40]
         execute("UPDATE users SET token = ? WHERE id = ?", (token, row["id"]))
         return {"success": True, "data": {"access_token": token, "username": row["username"], "user_id": row["id"]}}
     else:
         # 手机号不存在 -> 自动注册
-        import bcrypt
-        random_pw = hashlib.sha256(_os.urandom(32)).hexdigest()[:24]
-        pw_hash = bcrypt.hashpw(random_pw.encode(), bcrypt.gensalt(rounds=4)).decode()
-        token = "tok_" + hashlib.sha256(_os.urandom(32)).hexdigest()[:40]
+        # [P0 修复] rounds=4 -> rounds=12
+        random_pw = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
+        pw_hash = _bcrypt.hashpw(random_pw.encode(), _bcrypt.gensalt(rounds=12)).decode()
+        token = "tok_" + hashlib.sha256(os.urandom(32)).hexdigest()[:40]
         execute(
-            "INSERT INTO users (username, password_hash, token, created_at) VALUES (?, ?, ?, ?)",
-            (phone, pw_hash, token, time.time()))
+            "INSERT INTO users (username, password_hash, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (phone, pw_hash, token, time.time(), time.time() + 2592000))
         execute(
             "INSERT OR IGNORE INTO user_balance (user_id, balance, total_charged, total_spent, updated) VALUES ((SELECT id FROM users WHERE username=?), 0, 0, 0, ?)",
             (phone, time.time()))
@@ -168,9 +187,8 @@ async def register_alias(request: Request):
             return JSONResponse({"detail": "密码至少6位"}, status_code=400)
         conn = get_db()
         try:
-            # [安全修复] 新用户密码用 bcrypt 存储，不再用弱 sha256
-            import bcrypt
-            pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
+            # [P0 修复] bcrypt rounds=12 已在此处
+            pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt(rounds=12)).decode()
             row = conn.execute("SELECT id,username,password_hash,token FROM users WHERE username = ?", (username,)).fetchone()
             if row:
                 return JSONResponse({"detail": "账号已存在"}, status_code=400)
@@ -184,10 +202,10 @@ async def register_alias(request: Request):
             conn.commit()
             return {"success": True, "data": {"access_token": token, "username": username, "user_id": cur.lastrowid, "tier": "free", "avatar_url": ""}}
         except Exception as db_err:
-            __import__('logging').getLogger('api.auth').exception("Register DB error")
+            logging.getLogger("api.auth").exception("Register DB error")
             return JSONResponse({"detail": "注册失败，请稍后再试"}, status_code=500)
         finally:
             conn.close()
     except Exception as e:
-        __import__('logging').getLogger('api.auth').exception("Register unexpected error")
+        logging.getLogger("api.auth").exception("Register unexpected error")
         return JSONResponse({"detail": "服务器内部错误"}, status_code=500)

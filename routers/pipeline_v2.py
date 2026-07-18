@@ -3,6 +3,7 @@ Pipeline V2 API — 多智能体 MQ 模式
 所有 SQL 与实际表结构严格一致
 """
 import json
+import os
 import time
 import logging
 from fastapi import APIRouter, Request
@@ -41,8 +42,14 @@ async def start(req: PipelineStartRequest, request: Request):
     uid = req.user_id
     if uid <= 0:
         auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer"):
-            uid = 1
+        if auth.startswith("Bearer "):
+            token = auth[7:].strip()
+            from app_db import fetchone
+            row = fetchone("SELECT id FROM users WHERE token=?", (token,))
+            if row:
+                uid = row["id"]
+            else:
+                return {"success": False, "error": "未授权，请先登录"}
 
     # 如果前端已传入 project_id（从 step_pipeline 转发），直接复用
     if req.project_id:
@@ -54,7 +61,7 @@ async def start(req: PipelineStartRequest, request: Request):
     # 写入 pipelines（表结构: id, project_id, script_text, genre, status, progress, total_stages, current_stage, error, step_results, stage_outputs, created, updated, user_id）
     try:
         import sqlite3
-        conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+        conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
         conn.execute(
             "INSERT INTO pipelines (id, project_id, status, created, updated, user_id) VALUES (?,?,?,?,?,?)",
             (pipeline_id, project_id, "queued", time.time(), time.time(), uid),
@@ -69,7 +76,7 @@ async def start(req: PipelineStartRequest, request: Request):
     if not req.project_id:
         try:
             import sqlite3
-            conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+            conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
             conn.execute(
                 "INSERT INTO projects (title, genre, status, progress, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
                 (req.title, req.genre, "processing", 0, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
@@ -83,7 +90,7 @@ async def start(req: PipelineStartRequest, request: Request):
     existing_chars = []
     if req.episode > 1 and req.project_id:
         try:
-            conn2 = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+            conn2 = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
             rows = conn2.execute(
                 "SELECT characters FROM projects WHERE id=? LIMIT 1", 
                 (str(req.project_id),)
@@ -134,7 +141,7 @@ async def list_assets(pipeline_id: str, agent: str = None):
 async def status(pipeline_id: str):
     try:
         import sqlite3
-        conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+        conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT id, project_id, status, created, updated FROM pipelines WHERE id=?",
@@ -150,7 +157,17 @@ async def status(pipeline_id: str):
 
 def start_all_workers(counts: dict = None):
     if counts is None:
-        counts = {"script": 16, "director": 2, "character": 6, "storyboard": 3, "scene": 6, "video": 3, "composite": 2}
+        # [P1] Worker 数改为环境变量配置，默认值降低防 API 费用失控
+        import os as _os
+        counts = {
+            "script": int(_os.environ.get("WORKER_SCRIPT", "4")),
+            "director": int(_os.environ.get("WORKER_DIRECTOR", "2")),
+            "character": int(_os.environ.get("WORKER_CHARACTER", "3")),
+            "storyboard": int(_os.environ.get("WORKER_STORYBOARD", "2")),
+            "scene": int(_os.environ.get("WORKER_SCENE", "3")),
+            "video": int(_os.environ.get("WORKER_VIDEO", "2")),
+            "composite": int(_os.environ.get("WORKER_COMPOSITE", "1")),
+        }
     workers = [
         ("script", ScriptAgent),
         ("director", DirectorAgent),
@@ -176,7 +193,7 @@ async def v2_project_detail(project_id: str):
     """V2 项目详情（按 project_id 查，含全部资产）"""
     try:
         import sqlite3
-        conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+        conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
         conn.row_factory = sqlite3.Row
         # projects 表没有 pipeline_id 列，用 project_id 关联 pipelines 表
         row = conn.execute(
@@ -214,7 +231,7 @@ async def v2_download(project_id: str):
     """V2 项目下载"""
     try:
         import sqlite3
-        conn = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+        conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
         row = conn.execute(
             "SELECT p.id, p.title FROM projects p JOIN pipelines pl ON pl.project_id = p.id WHERE p.id=? AND pl.status='completed'",
             (project_id,)
