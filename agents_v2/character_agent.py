@@ -6,6 +6,7 @@ CharacterAgent V3 — 角色提取与合并
 """
 import json, logging, re
 from core.agent_base_v3 import AgentV3
+from core.safety_filter import clean_text
 from services.model_client import UnifiedModel
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,28 @@ logger = logging.getLogger(__name__)
 class CharacterAgent(AgentV3):
     name = "character"
     """角色提取师——从剧本/导演分析中提取角色列表，不做肖像生成"""
+
+
+    def _clean_result(self, result: dict) -> dict:
+        """递归清洗结果中的文本字段"""
+        if not isinstance(result, dict):
+            return result
+        for k, v in result.items():
+            if isinstance(v, str):
+                result[k] = clean_text(v)
+            elif isinstance(v, dict):
+                result[k] = self._clean_result(v)
+            elif isinstance(v, list):
+                cleaned_list = []
+                for item in v:
+                    if isinstance(item, dict):
+                        cleaned_list.append(self._clean_result(item))
+                    elif isinstance(item, str):
+                        cleaned_list.append(clean_text(item))
+                    else:
+                        cleaned_list.append(item)
+                result[k] = cleaned_list
+        return result
 
     def execute(self, task: dict) -> dict:
         data = task.get("data", {})
@@ -53,7 +76,9 @@ class CharacterAgent(AgentV3):
                     c["style_note"] = visual_style[:200]
 
         logger.info(f"[CharacterAgent] 合并 {len(deduped)} 个角色")
-        return {"success": True, "characters": deduped, "pipeline_id": pipeline_id, "genre": genre}
+        result = {"success": True, "characters": deduped, "pipeline_id": pipeline_id, "genre": genre}
+        result = self._clean_result(result)
+        return result
 
     def _extract_characters(self, script: str, genre: str, director_task: str = "") -> list:
         """LLM从剧本提取角色"""

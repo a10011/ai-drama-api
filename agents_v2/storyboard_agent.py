@@ -2,6 +2,7 @@
 """StoryboardAgent V3 — 真人短剧分镜标准"""
 import json, logging, re
 from core.agent_base_v3 import AgentV3
+from core.safety_filter import clean_text
 from services.model_client import UnifiedModel
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,8 @@ class StoryboardAgent(AgentV3):
                         candidate += ']' * (raw[:i].count('[') - raw[:i].count(']'))
                     result = json.loads(candidate)
                     if isinstance(result, list):
-                        return result
+                        result = self._clean_result(result)
+        return result
                 except:
                     continue
         return []

@@ -5,6 +5,7 @@ SceneAgent V3 — 场景图生成（含人脸锁定）
 """
 import json, logging, time
 from core.agent_base_v3 import AgentV3
+from core.safety_filter import clean_text
 from services.model_client import UnifiedModel
 from prompt_engine import build_scene_prompt
 import requests as _requests
@@ -16,6 +17,22 @@ class SceneAgent(AgentV3):
     name = "scene"
     task_timeout = 1800  # 25张图需要时间
     """场景图执行师——严格按导演和分镜师的描述生成场景图，不自行创作"""  # 25张图需要25*40=1000s
+
+
+    def _clean_result(self, result: dict) -> dict:
+        """递归清洗结果中的文本字段"""
+        if not isinstance(result, dict):
+            result = self._clean_result(result)
+        return result
+        for k, v in result.items():
+            if isinstance(v, str):
+                result[k] = clean_text(v)
+            elif isinstance(v, dict):
+                result[k] = self._clean_result(v)
+            elif isinstance(v, list):
+                result[k] = [self._clean_result(item) if isinstance(item, dict) else clean_text(item) if isinstance(item, str) else item for item in v]
+        result = self._clean_result(result)
+        return result
 
     def execute(self, task: dict) -> dict:
         data = task.get("data", {})

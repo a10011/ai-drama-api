@@ -10,7 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "/www/wwwroot/api.mzsh.top/data/safety_block_logs.db"
+DB_PATH = os.environ.get("SAFETY_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "safety_block_logs.db"))
 
 
 def _get_db():

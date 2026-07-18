@@ -59,6 +59,7 @@ async def start(req: PipelineStartRequest, request: Request):
     pipeline_id = next_id("PL")
 
     # 写入 pipelines（表结构: id, project_id, script_text, genre, status, progress, total_stages, current_stage, error, step_results, stage_outputs, created, updated, user_id）
+    conn = None
     try:
         import sqlite3
         conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
@@ -67,24 +68,29 @@ async def start(req: PipelineStartRequest, request: Request):
             (pipeline_id, project_id, "queued", time.time(), time.time(), uid),
         )
         conn.commit()
-        conn.close()
     except Exception as e:
         logger.warning(f"[V2] pipeline DB 失败: {e}")
+    finally:
+        if conn:
+            conn.close()
 
     # 写入 projects（表结构: id, title, script, genre, progress, status, characters, pipeline_steps, created, updated, user_id）
     # 如果 project_id 是前端已有的（字符串如 10011302），不要重复 INSERT
     if not req.project_id:
+        conn2 = None
         try:
             import sqlite3
-            conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
-            conn.execute(
+            conn2 = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
+            conn2.execute(
                 "INSERT INTO projects (title, genre, status, progress, user_id, created, updated, script) VALUES (?,?,?,?,?,?,?,?)",
                 (req.title, req.genre, "processing", 0, uid, time.time(), time.time(), req.script_text or req.synopsis or ""),
             )
-            conn.commit()
-            conn.close()
+            conn2.commit()
         except Exception as e:
             logger.warning(f"[V2] project DB 失败: {e}")
+        finally:
+            if conn2:
+                conn2.close()
 
     # 续集：如果提供已有project_id，复用角色数据
     existing_chars = []
@@ -229,6 +235,7 @@ async def v2_project_detail(project_id: str):
 @router.get("/project/{project_id}/download")
 async def v2_download(project_id: str):
     """V2 项目下载"""
+    conn = None
     try:
         import sqlite3
         conn = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
@@ -236,9 +243,11 @@ async def v2_download(project_id: str):
             "SELECT p.id, p.title FROM projects p JOIN pipelines pl ON pl.project_id = p.id WHERE p.id=? AND pl.status='completed'",
             (project_id,)
         ).fetchone()
-        conn.close()
         if not row:
             return {"success": False, "error": "尚未完成或没有视频"}
         return {"success": True, "project_id": row[0], "title": row[1], "video_url": ""}
     except Exception as e:
         return {"success": False, "error": str(e)}
+    finally:
+        if conn:
+            conn.close()

@@ -14,6 +14,7 @@ import json, logging, re
 from typing import Optional
 
 from services.model_client import UnifiedModel
+from core.safety_filter import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +419,22 @@ class EpisodeWriter:
 
     # -- 第一步：输出框架 --
 
+
+    def _clean_result(self, result: dict) -> dict:
+        """递归清洗结果中的文本字段"""
+        if not isinstance(result, dict):
+            result = self._clean_result(result)
+        return result
+        for k, v in result.items():
+            if isinstance(v, str):
+                result[k] = clean_text(v)
+            elif isinstance(v, dict):
+                result[k] = self._clean_result(v)
+            elif isinstance(v, list):
+                result[k] = [self._clean_result(item) if isinstance(item, dict) else clean_text(item) if isinstance(item, str) else item for item in v]
+        result = self._clean_result(result)
+        return result
+
     def write_framework(self, episode_input: dict) -> dict:
         """输出四段剧情框架。返回 {"success": bool, "framework": dict, "error": str}"""
         prompt = self._build_episode_prompt(episode_input)
@@ -485,6 +502,8 @@ class EpisodeWriter:
         if total_words < 400 or total_words > 600:
             logger.warning(f"[EpisodeWriter] 字数异常: {total_words}（标准 440-520）")
 
+        result = self._clean_result(result)
+        result = self._clean_result(result)
         return result_data
 
     # -- 一键生成 --

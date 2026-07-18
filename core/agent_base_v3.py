@@ -3,6 +3,7 @@ Agent V3 基类 — 进化版
 MQ 消费 + 多层记忆 + 反思学习 + 限流
 """
 import time
+import os
 import json
 import logging
 import threading
@@ -396,6 +397,7 @@ class AgentV3(ABC):
 def start_worker(agent_cls):
     name = agent_cls.name
     queue = AGENT_QUEUES[name]
+    worker_timeout = int(os.environ.get(f"WORKER_TIMEOUT_{name.upper()}", "600"))
 
     def _loop():
         logger.info(f"[Worker:{name}] 启动，监听 {queue}")
@@ -407,7 +409,7 @@ def start_worker(agent_cls):
                     continue
                 user_id = task.get("user_id", 0)
                 agent = agent_cls(user_id)
-                agent.run(task, timeout=600)
+                agent.run(task, timeout=worker_timeout)
             except Exception as e:
                 logger.error(f"[Worker:{name}] 异常: {e}", exc_info=True)
                 time.sleep(5)

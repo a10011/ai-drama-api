@@ -1,13 +1,32 @@
 # -*- coding: utf-8 -*-
 """CompositeAgent — 视频合成：合并所有镜头为成品"""
-import json, logging, os, subprocess, time, hashlib
+import json
+import os
+import shutil, logging, os, subprocess, time, hashlib
 from core.agent_base_v3 import AgentV3
+from core.safety_filter import clean_text
 
 logger = logging.getLogger(__name__)
 
 
 class CompositeAgent(AgentV3):
     name = "composite"
+
+
+    def _clean_result(self, result: dict) -> dict:
+        """递归清洗结果中的文本字段"""
+        if not isinstance(result, dict):
+            result = self._clean_result(result)
+        return result
+        for k, v in result.items():
+            if isinstance(v, str):
+                result[k] = clean_text(v)
+            elif isinstance(v, dict):
+                result[k] = self._clean_result(v)
+            elif isinstance(v, list):
+                result[k] = [self._clean_result(item) if isinstance(item, dict) else clean_text(item) if isinstance(item, str) else item for item in v]
+        result = self._clean_result(result)
+        return result
 
     def execute(self, task: dict) -> dict:
         data = task.get("data", {})
@@ -19,7 +38,7 @@ class CompositeAgent(AgentV3):
             # Try loading from pipeline_progress
             try:
                 import sqlite3
-                c = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+                c = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db")))
                 c.row_factory = sqlite3.Row
                 r = c.execute("SELECT data FROM pipeline_progress WHERE project_id=? AND stage='video' AND status='completed' ORDER BY id DESC LIMIT 1", (str(pid),)).fetchone()
                 c.close()
@@ -43,15 +62,15 @@ class CompositeAgent(AgentV3):
                     audio_map[str(idx)] = url
 
         # Write concat file
-        concat_path = "/tmp/concat_" + hashlib.md5(str(time.time()).encode()).hexdigest()[:8] + ".txt"
-        audio_concat_path = "/tmp/audio_concat_" + hashlib.md5(str(time.time()).encode()).hexdigest()[:8] + ".txt"
+        concat_path = os.path.join(os.environ.get("TMP_DIR", "/tmp"), "pipeline_" + str(user_id or 0) + "_concat_") + hashlib.md5(str(time.time()).encode()).hexdigest()[:8] + ".txt"
+        audio_concat_path = os.path.join(os.environ.get("TMP_DIR", "/tmp"), "pipeline_" + str(user_id or 0) + "_audio_") + hashlib.md5(str(time.time()).encode()).hexdigest()[:8] + ".txt"
         
         with open(concat_path, "w") as cf:
             with open(audio_concat_path, "w") as af:
                 for clip in clips:
                     url = clip if isinstance(clip, str) else clip.get("video_url", clip.get("url", ""))
                     if url and url.startswith("http"):
-                        local = "/tmp/video_" + hashlib.md5(url.encode()).hexdigest()[:8] + ".mp4"
+                        local = os.path.join(os.environ.get("TMP_DIR", "/tmp"), "pipeline_" + str(user_id or 0) + "_video_") + hashlib.md5(url.encode()).hexdigest()[:8] + ".mp4"
                         try:
                             import requests
                             r = requests.get(url, timeout=300)
@@ -83,7 +102,7 @@ class CompositeAgent(AgentV3):
                             af.write("file '" + audio_url + "'\n")
 
         # FFmpeg concat 视频
-        out_dir = "/www/wwwroot/storage/videos"
+        out_dir = os.environ.get("VIDEO_STORAGE_DIR", "/www/wwwroot/storage/videos")
         os.makedirs(out_dir, exist_ok=True)
         out_name = str(pid).replace("/", "_") + "_final.mp4"
         out_path = os.path.join(out_dir, out_name)

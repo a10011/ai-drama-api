@@ -1,3 +1,31 @@
+import hashlib
+import base64
+import hmac
+
+# [P1] API Key 加密存储
+ENCRYPTION_KEY = os.environ.get("API_KEY_ENCRYPTION_KEY", "default-encryption-key-change-me-in-production")
+
+def _encrypt_key(key: str) -> str:
+    """简单 XOR + Base64 加密 API Key（生产环境应使用 AES）"""
+    if not key:
+        return ""
+    key_bytes = key.encode('utf-8')
+    enc_key = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
+    encrypted = bytes(a ^ b for a, b in zip(key_bytes, (enc_key * (len(key_bytes) // len(enc_key) + 1))[:len(key_bytes)]))
+    return base64.b64encode(encrypted).decode('ascii')
+
+def _decrypt_key(encoded: str) -> str:
+    """解密 API Key"""
+    if not encoded:
+        return ""
+    try:
+        encrypted = base64.b64decode(encoded.encode('ascii'))
+        enc_key = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
+        decrypted = bytes(a ^ b for a, b in zip(encrypted, (enc_key * (len(encrypted) // len(enc_key) + 1))[:len(encrypted)]))
+        return decrypted.decode('utf-8')
+    except Exception:
+        return encoded
+
 #!/usr/bin/env python3
 """
 会员 API Key 管理 — BYOK (Bring Your Own Key)
@@ -80,6 +108,9 @@ def get_user_keys(user_id: int) -> dict:
 def save_user_key(user_id: int, provider: str, api_key: str, api_secret: str = "", desc: str = ""):
     """保存/更新会员的 Key"""
     conn = get_db()
+    # [P1] 存储时加密
+    enc_key = _encrypt_key(api_key)
+    enc_secret = _encrypt_key(api_secret)
     conn.execute("""
         INSERT INTO user_api_keys (user_id, provider, api_key, api_secret, description, updated_at)
         VALUES (?,?,?,?,?, strftime('%s','now'))
@@ -87,7 +118,7 @@ def save_user_key(user_id: int, provider: str, api_key: str, api_secret: str = "
         DO UPDATE SET api_key=excluded.api_key, api_secret=excluded.api_secret,
                       description=excluded.description, is_active=1,
                       updated_at=strftime('%s','now')
-    """, (user_id, provider, api_key, api_secret, desc))
+    """, (user_id, provider, enc_key, enc_secret, desc))
     conn.commit()
     conn.close()
 
@@ -113,8 +144,8 @@ def get_effective_key(user_id: int, provider: str, system_key_func=None):
 
     if row and row["api_key"]:
         return {
-            "key": row["api_key"],
-            "secret": row["api_secret"],
+            "key": _decrypt_key(row["api_key"]),
+            "secret": _decrypt_key(row["api_secret"]),
             "byok": True
         }
 
