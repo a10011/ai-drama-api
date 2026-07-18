@@ -336,9 +336,10 @@ class AgentV3(ABC):
                     json_str = json.dumps(business_data, ensure_ascii=False)
                     if len(json_str) > 50000:
                         import os, hashlib
-                        os.makedirs('/www/wwwroot/storage/assets', exist_ok=True)
+                        storage_dir = os.environ.get("STORAGE_DIR", "/www/wwwroot/storage/assets")
+                        os.makedirs(storage_dir, exist_ok=True)
                         fname = f'{asset_type}_{pid[:12]}_{hashlib.md5(json_str.encode()).hexdigest()[:8]}.json'
-                        fpath = f'/www/wwwroot/storage/assets/{fname}'
+                        fpath = f"{storage_dir}/{fname}"
                         with open(fpath, 'w', encoding='utf-8') as f:
                             f.write(json_str)
                         self.log_asset(asset_type, file_path=fpath, meta={"pipeline_id": pid, "size": len(json_str)})

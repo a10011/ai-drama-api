@@ -1,10 +1,11 @@
+import os
 #!/usr/bin/env python3
 """
 完整 ID 体系 + 资产追踪表
 """
 import sqlite3, os, time, threading
 
-DB = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
+DB = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "short_drama.db"))
 _lock = threading.Lock()
 
 
