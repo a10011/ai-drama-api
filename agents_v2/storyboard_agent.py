@@ -138,7 +138,6 @@ class StoryboardAgent(AgentV3):
                     result = json.loads(candidate)
                     if isinstance(result, list):
                         result = self._clean_result(result)
-        return result
                 except:
                     continue
-        return []
+        return result or []

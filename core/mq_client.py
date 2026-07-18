@@ -227,10 +227,10 @@ class MQ:
                 return json.loads(row[0])
         except:
             pass
-        return None
         finally:
             if conn:
                 conn.close()
+        return None
 
     def close(self):
         pass
