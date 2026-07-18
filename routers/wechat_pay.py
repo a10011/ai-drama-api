@@ -1,4 +1,4 @@
-"""WeChat Pay router - APIv3 native implementation (Native QR + JSAPI)
+"""WeChat Pay router - APIv3 native implementation (Native QR + H5 + JSAPI)
 No third-party SDK dependency. Uses cryptography for RSA signing.
 Config file: config/wechat_pay.json
 """
@@ -17,6 +17,7 @@ CONFIG_DIR = "/www/wwwroot/api.mzsh.top/config"
 DB_PATH = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
 WECHAT_CONFIG_FILE = f"{CONFIG_DIR}/wechat_pay.json"
 NOTIFY_URL_NATIVE = "https://api.mzsh.top/api/v1/wechat/pay/native-notify"
+NOTIFY_URL_H5 = "https://api.mzsh.top/api/v1/wechat/pay/h5-notify"
 NOTIFY_URL_JSAPI = "https://api.mzsh.top/api/v1/wechat/pay/jsapi-notify"
 
 
@@ -88,6 +89,14 @@ def _get_product_name(config, product_id):
     p = products.get(product_id, {})
     return p.get("name", product_id)
 
+
+
+
+def _get_client_ip(request):
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "127.0.0.1"
 
 def _call_wechat_api(config, endpoint, req_body):
     """Call WeChat Pay API v3 with RSA signature"""
@@ -195,7 +204,52 @@ async def native_create_payment(request: Request):
 
 
 # ════════════════════════════════════════
-# 2. JSAPI Payment (WeChat Official Account / Mini Program)
+# 2. H5 Payment (Mobile browser)
+# ===============================
+
+
+@router.post("/h5/create")
+async def h5_create_payment(request):
+    user_id = get_user_id(request)
+    if not user_id:
+        return JSONResponse({"success": False, "error": "Please login first"}, status_code=401)
+    body = await request.json()
+    product_id = body.get("product_id", "")
+    quantity = int(body.get("quantity", 1))
+    config = _load_wechat_config()
+    if not config:
+        return JSONResponse({"success": False, "error": "WeChat Pay not configured"}, status_code=502)
+    amount_cents = _calc_amount(config, product_id, quantity, body)
+    if amount_cents is None:
+        return JSONResponse({"success": False, "error": "Unknown product: " + product_id}, status_code=400)
+    total_fee = amount_cents
+    if total_fee <= 0:
+        return JSONResponse({"success": False, "error": "Amount must be > 0"}, status_code=400)
+    order_id = "WP" + str(int(time.time())) + uuid.uuid4().hex[:8]
+    description = body.get("title", _get_product_name(config, product_id))
+    _create_order(order_id, user_id, description, total_fee / 100, product_id)
+    req_body = {
+        "appid": config["appid"],
+        "mchid": config["merchant_id"],
+        "description": description[:127],
+        "out_trade_no": order_id,
+        "time_expire": datetime.fromtimestamp(time.time() + 1800, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+        "attach": product_id,
+        "notify_url": NOTIFY_URL_H5,
+        "amount": {"total": total_fee, "currency": "CNY"},
+        "scene_info": {
+            "payer_client_ip": _get_client_ip(request),
+            "scene_info": {"payer_client_ip": _get_client_ip(request)},
+        },
+    }
+    result = _call_wechat_api(config, "/api/v3/pay/transactions/h5", req_body)
+    mweb_url = result.get("h5_url", "")
+    if not mweb_url:
+        logger.error("No h5_url from WeChat: " + str(result))
+        return JSONResponse({"success": False, "error": "Failed to get payment link"})
+    return {"success": True, "data": {"mweb_url": mweb_url, "order_id": order_id, "amount": total_fee / 100}}
+
+# 3. JSAPI Payment (WeChat Official Account / Mini Program)
 # ════════════════════════════════════════
 @router.post("/jsapi/create")
 async def jsapi_create_payment(request: Request):
@@ -277,6 +331,13 @@ async def jsapi_create_payment(request: Request):
 # ════════════════════════════════════════
 @router.post("/native-notify")
 async def native_notify(request: Request):
+    await _handle_pay_callback(request)
+    return "success"
+
+
+
+@router.post("/h5-notify")
+async def h5_notify(request):
     await _handle_pay_callback(request)
     return "success"
 
