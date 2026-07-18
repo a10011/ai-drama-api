@@ -219,7 +219,6 @@ class DirectorAgent(AgentV3):
                 prompt=prompt,
                 system=SYSTEM_PROMPT,
                 max_tokens=12288,
-                temperature=0.2,
                 timeout=300,
             )
             content = result.get("text", "{}")

@@ -122,8 +122,12 @@ class AgentV3(ABC):
             if not kwargs.get("request_id"):
                 import uuid, time
                 kwargs["request_id"] = pid + "-" + self.name + "-" + str(int(time.time()*1000))[-6:]
+        # 过滤 func 不接受的参数，避免 TypeError
+        import inspect
+        sig = inspect.signature(func)
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
         return rate_limiter.execute(
-            self.user_id, model, rpm, func, *args, **kwargs
+            self.user_id, model, rpm, func, *args, **filtered_kwargs
         )
 
     def call_with_safety_retry(self, model: str, rpm: float, func, *args,
@@ -337,9 +341,9 @@ class AgentV3(ABC):
                         fpath = f'/www/wwwroot/storage/assets/{fname}'
                         with open(fpath, 'w', encoding='utf-8') as f:
                             f.write(json_str)
-                        self.register_asset(asset_type, file_path=fpath, meta={"pipeline_id": pid, "size": len(json_str)})
+                        self.log_asset(asset_type, file_path=fpath, meta={"pipeline_id": pid, "size": len(json_str)})
                     else:
-                        self.register_asset(asset_type, url=json_str, meta={"pipeline_id": pid, "size": len(json_str)})
+                        self.log_asset(asset_type, url=json_str, meta={"pipeline_id": pid, "size": len(json_str)})
         except Exception as e:
             logger.warning(f"[Worker:{self.name}] asset register failed: {e}")
         # push next stage

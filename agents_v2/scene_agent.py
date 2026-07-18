@@ -140,7 +140,6 @@ class SceneAgent(AgentV3):
                     prompt=prompt,
                     preferred="agnes",
                     size="2K",
-                    ratio="9:16",
                 )
                 url = result.url if hasattr(result, 'url') else result.get("url", "")
                 if url:
@@ -169,7 +168,6 @@ class SceneAgent(AgentV3):
                     prompt=prompt,
                     preferred="agnes",
                     size="2K",
-                    ratio="9:16",
                     reference_image=ref_url,
                 )
                 url = result.url if hasattr(result, 'url') else result.get("url", "")
