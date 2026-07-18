@@ -8,11 +8,11 @@ router = APIRouter(prefix="/api/v1/alipay", tags=["alipay"])
 logger = logging.getLogger(__name__)
 
 # ── 配置 ──
-APP_ID = "2021006169683274"
-CONFIG_DIR = "/www/wwwroot/api.mzsh.top/config"
-NOTIFY_URL = "https://api.mzsh.top/api/v1/alipay/notify"
-RETURN_URL = "https://ai.mzsh.top/payment/success"
-DB_PATH = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
+APP_ID = os.environ.get("ALIPAY_APP_ID", "2021006169683274")
+CONFIG_DIR = os.environ.get("ALIPAY_CONFIG_DIR", "/www/wwwroot/api.mzsh.top/config")
+NOTIFY_URL = os.environ.get("ALIPAY_NOTIFY_URL", "https://api.mzsh.top/api/v1/alipay/notify")
+RETURN_URL = os.environ.get("ALIPAY_RETURN_URL", "https://ai.mzsh.top/payment/success")
+DB_PATH = os.environ.get("ALIPAY_DB_PATH", "/www/wwwroot/api.mzsh.top/data/short_drama.db")
 
 PRODUCTS = {
     "vip_month":   {"name": "月度会员",    "price": 29.90},

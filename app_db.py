@@ -21,7 +21,7 @@ def init_db():
     conn = get_conn()
     conn.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE,
-        password_hash TEXT, email TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        password_hash TEXT, email TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, title TEXT,
         genre TEXT, status TEXT DEFAULT 'draft', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')

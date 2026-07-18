@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/pipeline", tags=["短剧流水线"])
 
 # ─── 常量 ──────────────────────────────────────────────
-DB_DIR = "/www/wwwroot/api.mzsh.top/data"
+DB_DIR = os.environ.get("DB_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data"))
 DB_PATH = os.path.join(DB_DIR, "short_drama.db")
 MAX_WORKERS = 4  # SQLite单写锁，4线程足够，避免database locked
 MAX_AUTO_RETRIES = 3          # v5: 最多自动重试次数
