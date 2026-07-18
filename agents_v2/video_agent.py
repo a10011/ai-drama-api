@@ -5,6 +5,7 @@ VideoAgent V3 — 视频片段生成
 """
 import json, logging, time
 from core.agent_base_v3 import AgentV3
+from core.safety_filter import clean_text
 from services.ai_providers import agnes
 from prompt_engine import build_video_prompt
 
@@ -13,6 +14,22 @@ logger = logging.getLogger(__name__)
 
 class VideoAgent(AgentV3):
     name = "video"
+
+
+    def _clean_result(self, result: dict) -> dict:
+        """递归清洗结果中的文本字段"""
+        if not isinstance(result, dict):
+            result = self._clean_result(result)
+        return result
+        for k, v in result.items():
+            if isinstance(v, str):
+                result[k] = clean_text(v)
+            elif isinstance(v, dict):
+                result[k] = self._clean_result(v)
+            elif isinstance(v, list):
+                result[k] = [self._clean_result(item) if isinstance(item, dict) else clean_text(item) if isinstance(item, str) else item for item in v]
+        result = self._clean_result(result)
+        return result
 
     def execute(self, task: dict) -> dict:
         data = task.get("data", {})

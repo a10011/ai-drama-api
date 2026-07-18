@@ -1,4 +1,6 @@
-import json, logging, time, sqlite3
+import json
+import os
+import time, logging, time, sqlite3
 from pydantic import BaseModel
 from utils.auth_util import get_user_id
 from fastapi import APIRouter, Request, HTTPException
@@ -18,7 +20,7 @@ async def balance(request: Request):
 async def query_freeze(project_id: str, request: Request):
     user_id = getattr(request.state, "user_id", 0) or request.headers.get("X-User-Id", "0")
     import sqlite3
-    db = sqlite3.connect("/www/wwwroot/api.mzsh.top/data/short_drama.db")
+    db = sqlite3.connect(os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "short_drama.db")))
     db.row_factory = sqlite3.Row
     r = db.execute(
         "SELECT * FROM balance_freeze WHERE project_id=? ORDER BY id DESC LIMIT 1",
@@ -39,19 +41,23 @@ class RechargeRequest(BaseModel):
     amount: float
     method: str = "\u6a21\u62df\u5145\u503c"
 
-DB = "/www/wwwroot/api.mzsh.top/data/short_drama.db"
+DB = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "short_drama.db"))
 
 def _get_or_create_balance(uid):
-    db = sqlite3.connect(DB)
-    db.row_factory = sqlite3.Row
-    r = db.execute("SELECT * FROM user_balance WHERE user_id=?", (uid,)).fetchone()
-    if not r:
-        db.execute("INSERT INTO user_balance (user_id, balance, total_charged, total_spent, frozen, created, updated) VALUES (?,0,0,0,0,?,?)",
-                   (uid, time.time(), time.time()))
-        db.commit()
+    db = None
+    try:
+        db = sqlite3.connect(DB)
+        db.row_factory = sqlite3.Row
         r = db.execute("SELECT * FROM user_balance WHERE user_id=?", (uid,)).fetchone()
-    db.close()
-    return dict(r) if r else {"user_id": uid, "balance": 0, "frozen": 0, "total_charged": 0, "total_spent": 0}
+        if not r:
+            db.execute("INSERT INTO user_balance (user_id, balance, total_charged, total_spent, frozen, created, updated) VALUES (?,0,0,0,0,?,?)",
+                       (uid, time.time(), time.time()))
+            db.commit()
+            r = db.execute("SELECT * FROM user_balance WHERE user_id=?", (uid,)).fetchone()
+        return dict(r) if r else {"user_id": uid, "balance": 0, "frozen": 0, "total_charged": 0, "total_spent": 0}
+    finally:
+        if db:
+            db.close()
 
 @router.post("/recharge")
 async def billing_recharge(request: Request, body: RechargeRequest):
@@ -61,11 +67,15 @@ async def billing_recharge(request: Request, body: RechargeRequest):
     if body.amount <= 0:
         raise HTTPException(status_code=400, detail="\u5145\u503c\u91d1\u989d\u5fc5\u987b\u5927\u4e8e0")
     bal = _get_or_create_balance(user_id)
-    db = sqlite3.connect(DB)
-    db.execute("UPDATE user_balance SET balance=balance+?, total_charged=total_charged+?, updated=? WHERE user_id=?",
-               (body.amount, body.amount, time.time(), user_id))
-    db.commit()
-    db.close()
+    db = None
+    try:
+        db = sqlite3.connect(DB)
+        db.execute("UPDATE user_balance SET balance=balance+?, total_charged=total_charged+?, updated=? WHERE user_id=?",
+                   (body.amount, body.amount, time.time(), user_id))
+        db.commit()
+    finally:
+        if db:
+            db.close()
     bal = _get_or_create_balance(user_id)
     logger.info(f"\u5145\u503c user_id={user_id} amount={body.amount} method={body.method}")
     return {"success": True, "data": {"balance": round(bal["balance"], 2), "charged": body.amount}}
@@ -114,15 +124,22 @@ def _estimate_cost(script_text: str = "", character_count: int = 0,
     }
 
 def _deduct_balance(user_id: int, amount: float) -> bool:
-    db = sqlite3.connect(DB)
-    r = db.execute("SELECT balance FROM user_balance WHERE user_id=?", (user_id,)).fetchone()
-    if not r or r[0] < amount:
-        db.close()
+    db = None
+    try:
+        db = sqlite3.connect(DB)
+        r = db.execute("SELECT balance FROM user_balance WHERE user_id=?", (user_id,)).fetchone()
+        if not r or r[0] < amount:
+            return False
+        db.execute("UPDATE user_balance SET balance=balance-?, total_spent=total_spent+?, updated=? WHERE user_id=?", (amount, amount, time.time(), user_id))
+        db.commit()
+        return True
+    except Exception:
+        if db:
+            db.rollback()
         return False
-    db.execute("UPDATE user_balance SET balance=balance-?, total_spent=total_spent+?, updated=? WHERE user_id=?", (amount, amount, time.time(), user_id))
-    db.commit()
-    db.close()
-    return True
+    finally:
+        if db:
+            db.close()
 
 def check_and_deduct_for_project(user_id: int, script_text: str = "",
                                   character_count: int = 0, scene_count: int = 0,
