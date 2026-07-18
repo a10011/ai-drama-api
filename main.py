@@ -477,6 +477,10 @@ app.include_router(command.router, tags=["command"])
 app.include_router(tool_routes.router)
 app.include_router(points_router.router)
 app.include_router(wechat_router.router)
+from routers import alipay
+app.include_router(alipay.router)
+from routers import wechat_pay
+app.include_router(wechat_pay.router)
 app.include_router(assets_router)
 
 
